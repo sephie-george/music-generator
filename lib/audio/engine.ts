@@ -342,6 +342,16 @@ export class AudioEngine {
     return this.isPlaying;
   }
 
+  // Trigger a single track's chop (for note preview)
+  triggerTrack(trackIndex: number) {
+    const track = this.tracks[trackIndex];
+    if (!track?.player || !Tone) return;
+    try {
+      track.player.stop();
+      track.player.start();
+    } catch {}
+  }
+
   // Export to WAV
   async exportWAV(): Promise<Blob> {
     if (!this.sourceBuffer) throw new Error("No audio loaded");

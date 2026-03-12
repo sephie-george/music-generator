@@ -241,10 +241,15 @@ export default function EditorPage() {
     if (chopIdx < 0) return;
 
     const newPattern = pattern.map((row) => [...row]);
-    newPattern[track][step] =
-      newPattern[track][step] >= 0 ? -1 : chopIdx;
+    const wasActive = newPattern[track][step] >= 0;
+    newPattern[track][step] = wasActive ? -1 : chopIdx;
     setPattern(newPattern);
     engineRef.current?.setPattern(newPattern);
+
+    // Preview sound when adding a note
+    if (!wasActive) {
+      engineRef.current?.triggerTrack(track);
+    }
   };
 
   // Mouse drag painting
@@ -960,38 +965,70 @@ export default function EditorPage() {
                           </option>
                         ))}
                       </select>
-                      {/* Delay */}
-                      <select
-                        value={trackEffects[t].delay}
-                        onChange={(e) =>
-                          setDelay(t, e.target.value as DelayPreset)
-                        }
-                        className="w-[52px] px-0.5 py-0.5 rounded bg-transparent border border-transparent hover:border-border text-[10px] focus:outline-none truncate"
-                      >
-                        {Object.entries(DELAY_PRESETS).map(([key, val]) => (
-                          <option key={key} value={key}>
-                            {val.label.length > 8
-                              ? val.label.slice(0, 8)
-                              : val.label}
-                          </option>
-                        ))}
-                      </select>
-                      {/* Reverb */}
-                      <select
-                        value={trackEffects[t].reverb}
-                        onChange={(e) =>
-                          setReverb(t, e.target.value as ReverbPreset)
-                        }
-                        className="w-[52px] px-0.5 py-0.5 rounded bg-transparent border border-transparent hover:border-border text-[10px] focus:outline-none truncate"
-                      >
-                        {Object.entries(REVERB_PRESETS).map(([key, val]) => (
-                          <option key={key} value={key}>
-                            {val.label.length > 8
-                              ? val.label.slice(0, 8)
-                              : val.label}
-                          </option>
-                        ))}
-                      </select>
+                      {/* Delay toggle + dropdown */}
+                      <div className="flex items-center gap-0">
+                        <button
+                          onClick={() => setDelay(t, trackEffects[t].delay === "none" ? "eighth" : "none")}
+                          title="Toggle delay"
+                          className={`px-1 py-0.5 rounded-l text-[9px] font-bold border ${
+                            trackEffects[t].delay !== "none"
+                              ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
+                              : "text-muted-foreground hover:text-foreground border-transparent hover:border-border"
+                          }`}
+                          style={{ fontFamily: "var(--font-mono)" }}
+                        >
+                          D
+                        </button>
+                        {trackEffects[t].delay !== "none" && (
+                          <select
+                            value={trackEffects[t].delay}
+                            onChange={(e) =>
+                              setDelay(t, e.target.value as DelayPreset)
+                            }
+                            className="w-[44px] px-0 py-0.5 rounded-r bg-blue-500/10 border border-l-0 border-blue-500/20 text-[9px] text-blue-400 focus:outline-none truncate"
+                          >
+                            {Object.entries(DELAY_PRESETS)
+                              .filter(([key]) => key !== "none")
+                              .map(([key, val]) => (
+                                <option key={key} value={key}>
+                                  {key === "slap" ? "Slap" : key === "eighth" ? "8th" : key === "quarter" ? "1/4" : "Dot"}
+                                </option>
+                              ))}
+                          </select>
+                        )}
+                      </div>
+                      {/* Reverb toggle + dropdown */}
+                      <div className="flex items-center gap-0">
+                        <button
+                          onClick={() => setReverb(t, trackEffects[t].reverb === "none" ? "room" : "none")}
+                          title="Toggle reverb"
+                          className={`px-1 py-0.5 rounded-l text-[9px] font-bold border ${
+                            trackEffects[t].reverb !== "none"
+                              ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                              : "text-muted-foreground hover:text-foreground border-transparent hover:border-border"
+                          }`}
+                          style={{ fontFamily: "var(--font-mono)" }}
+                        >
+                          R
+                        </button>
+                        {trackEffects[t].reverb !== "none" && (
+                          <select
+                            value={trackEffects[t].reverb}
+                            onChange={(e) =>
+                              setReverb(t, e.target.value as ReverbPreset)
+                            }
+                            className="w-[44px] px-0 py-0.5 rounded-r bg-emerald-500/10 border border-l-0 border-emerald-500/20 text-[9px] text-emerald-400 focus:outline-none truncate"
+                          >
+                            {Object.entries(REVERB_PRESETS)
+                              .filter(([key]) => key !== "none")
+                              .map(([key]) => (
+                                <option key={key} value={key}>
+                                  {key === "room" ? "Room" : key === "hall" ? "Hall" : key === "cathedral" ? "Cath" : "Inf"}
+                                </option>
+                              ))}
+                          </select>
+                        )}
+                      </div>
                       {/* Pitch (semitones) */}
                       <input
                         type="number"
@@ -1053,38 +1090,82 @@ export default function EditorPage() {
                     >
                       MASTER
                     </span>
-                    {/* Master Delay */}
-                    <select
-                      value={masterDelay}
-                      onChange={(e) => {
-                        const v = e.target.value as DelayPreset;
-                        setMasterDelay(v);
-                        engineRef.current?.setMasterDelay(v);
-                      }}
-                      className="w-[52px] px-0.5 py-0.5 rounded bg-transparent border border-transparent hover:border-border text-[10px] focus:outline-none truncate"
-                    >
-                      {Object.entries(DELAY_PRESETS).map(([key, val]) => (
-                        <option key={key} value={key}>
-                          {val.label.length > 8 ? val.label.slice(0, 8) : val.label}
-                        </option>
-                      ))}
-                    </select>
-                    {/* Master Reverb */}
-                    <select
-                      value={masterReverb}
-                      onChange={(e) => {
-                        const v = e.target.value as ReverbPreset;
-                        setMasterReverb(v);
-                        engineRef.current?.setMasterReverb(v);
-                      }}
-                      className="w-[52px] px-0.5 py-0.5 rounded bg-transparent border border-transparent hover:border-border text-[10px] focus:outline-none truncate"
-                    >
-                      {Object.entries(REVERB_PRESETS).map(([key, val]) => (
-                        <option key={key} value={key}>
-                          {val.label.length > 8 ? val.label.slice(0, 8) : val.label}
-                        </option>
-                      ))}
-                    </select>
+                    {/* Master Delay toggle + dropdown */}
+                    <div className="flex items-center gap-0">
+                      <button
+                        onClick={() => {
+                          const v = masterDelay === "none" ? "eighth" : "none";
+                          setMasterDelay(v);
+                          engineRef.current?.setMasterDelay(v);
+                        }}
+                        title="Toggle master delay"
+                        className={`px-1 py-0.5 rounded-l text-[9px] font-bold border ${
+                          masterDelay !== "none"
+                            ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
+                            : "text-muted-foreground hover:text-foreground border-transparent hover:border-border"
+                        }`}
+                        style={{ fontFamily: "var(--font-mono)" }}
+                      >
+                        D
+                      </button>
+                      {masterDelay !== "none" && (
+                        <select
+                          value={masterDelay}
+                          onChange={(e) => {
+                            const v = e.target.value as DelayPreset;
+                            setMasterDelay(v);
+                            engineRef.current?.setMasterDelay(v);
+                          }}
+                          className="w-[44px] px-0 py-0.5 rounded-r bg-blue-500/10 border border-l-0 border-blue-500/20 text-[9px] text-blue-400 focus:outline-none truncate"
+                        >
+                          {Object.entries(DELAY_PRESETS)
+                            .filter(([key]) => key !== "none")
+                            .map(([key]) => (
+                              <option key={key} value={key}>
+                                {key === "slap" ? "Slap" : key === "eighth" ? "8th" : key === "quarter" ? "1/4" : "Dot"}
+                              </option>
+                            ))}
+                        </select>
+                      )}
+                    </div>
+                    {/* Master Reverb toggle + dropdown */}
+                    <div className="flex items-center gap-0">
+                      <button
+                        onClick={() => {
+                          const v = masterReverb === "none" ? "hall" : "none";
+                          setMasterReverb(v);
+                          engineRef.current?.setMasterReverb(v);
+                        }}
+                        title="Toggle master reverb"
+                        className={`px-1 py-0.5 rounded-l text-[9px] font-bold border ${
+                          masterReverb !== "none"
+                            ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                            : "text-muted-foreground hover:text-foreground border-transparent hover:border-border"
+                        }`}
+                        style={{ fontFamily: "var(--font-mono)" }}
+                      >
+                        R
+                      </button>
+                      {masterReverb !== "none" && (
+                        <select
+                          value={masterReverb}
+                          onChange={(e) => {
+                            const v = e.target.value as ReverbPreset;
+                            setMasterReverb(v);
+                            engineRef.current?.setMasterReverb(v);
+                          }}
+                          className="w-[44px] px-0 py-0.5 rounded-r bg-emerald-500/10 border border-l-0 border-emerald-500/20 text-[9px] text-emerald-400 focus:outline-none truncate"
+                        >
+                          {Object.entries(REVERB_PRESETS)
+                            .filter(([key]) => key !== "none")
+                            .map(([key]) => (
+                              <option key={key} value={key}>
+                                {key === "room" ? "Room" : key === "hall" ? "Hall" : key === "cathedral" ? "Cath" : "Inf"}
+                              </option>
+                            ))}
+                        </select>
+                      )}
+                    </div>
                   </div>
                 </div>
 
