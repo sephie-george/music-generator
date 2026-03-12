@@ -1,4 +1,4 @@
-import { sql } from "@vercel/postgres";
+import { put, del, list, head } from "@vercel/blob";
 import type { ProjectData, ProjectMeta, TrackState } from "../types";
 
 function defaultTracks(): TrackState[] {
@@ -17,108 +17,99 @@ function emptyPattern(): number[][] {
   return Array.from({ length: 16 }, () => Array(32).fill(-1));
 }
 
-export async function ensureTable() {
-  await sql`
-    CREATE TABLE IF NOT EXISTS projects (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      bpm INTEGER NOT NULL DEFAULT 120,
-      steps INTEGER NOT NULL DEFAULT 32,
-      tracks JSONB NOT NULL DEFAULT '[]',
-      pattern JSONB NOT NULL DEFAULT '[]',
-      chop_boundaries JSONB NOT NULL DEFAULT '[]',
-      audio_url TEXT
-    )
-  `;
-}
+const PROJECT_PREFIX = "projects/";
+const AUDIO_PREFIX = "audio/";
 
 export async function dbGetProjectList(): Promise<ProjectMeta[]> {
-  await ensureTable();
-  const { rows } = await sql`
-    SELECT id, name, created_at, updated_at,
-           jsonb_array_length(chop_boundaries) as chop_count
-    FROM projects
-    ORDER BY updated_at DESC
-  `;
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    createdAt: r.created_at.toISOString(),
-    updatedAt: r.updated_at.toISOString(),
-    chopCount: Number(r.chop_count),
-  }));
+  const { blobs } = await list({ prefix: PROJECT_PREFIX });
+  const projects: ProjectMeta[] = [];
+
+  for (const blob of blobs) {
+    try {
+      const res = await fetch(blob.url);
+      const data: ProjectData = await res.json();
+      projects.push({
+        id: data.id,
+        name: data.name,
+        createdAt: data.createdAt,
+        updatedAt: data.updatedAt,
+        chopCount: data.chopBoundaries?.length ?? 0,
+      });
+    } catch {
+      // skip corrupted blobs
+    }
+  }
+
+  projects.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  return projects;
 }
 
 export async function dbGetProject(id: string): Promise<ProjectData | null> {
-  await ensureTable();
-  const { rows } = await sql`SELECT * FROM projects WHERE id = ${id}`;
-  if (rows.length === 0) return null;
-  const r = rows[0];
-  return {
-    id: r.id,
-    name: r.name,
-    createdAt: r.created_at.toISOString(),
-    updatedAt: r.updated_at.toISOString(),
-    bpm: r.bpm,
-    steps: r.steps,
-    tracks: r.tracks,
-    pattern: r.pattern,
-    chopBoundaries: r.chop_boundaries,
-  };
+  try {
+    const blobInfo = await head(`${PROJECT_PREFIX}${id}.json`);
+    const res = await fetch(blobInfo.url);
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 export async function dbCreateProject(id: string, name: string): Promise<ProjectData> {
-  await ensureTable();
-  const tracks = defaultTracks();
-  const pattern = emptyPattern();
-  const now = new Date();
-  await sql`
-    INSERT INTO projects (id, name, created_at, updated_at, bpm, steps, tracks, pattern, chop_boundaries)
-    VALUES (${id}, ${name}, ${now.toISOString()}, ${now.toISOString()}, 120, 32, ${JSON.stringify(tracks)}, ${JSON.stringify(pattern)}, '[]')
-  `;
-  return {
+  const now = new Date().toISOString();
+  const project: ProjectData = {
     id,
     name,
-    createdAt: now.toISOString(),
-    updatedAt: now.toISOString(),
+    createdAt: now,
+    updatedAt: now,
     bpm: 120,
     steps: 32,
-    tracks,
-    pattern,
+    tracks: defaultTracks(),
+    pattern: emptyPattern(),
     chopBoundaries: [],
   };
+  await put(`${PROJECT_PREFIX}${id}.json`, JSON.stringify(project), {
+    access: "public",
+    addRandomSuffix: false,
+    contentType: "application/json",
+  });
+  return project;
 }
 
 export async function dbSaveProject(project: ProjectData): Promise<void> {
-  await ensureTable();
-  const now = new Date().toISOString();
-  await sql`
-    INSERT INTO projects (id, name, created_at, updated_at, bpm, steps, tracks, pattern, chop_boundaries)
-    VALUES (${project.id}, ${project.name}, ${project.createdAt}, ${now}, ${project.bpm}, ${project.steps},
-            ${JSON.stringify(project.tracks)}, ${JSON.stringify(project.pattern)}, ${JSON.stringify(project.chopBoundaries)})
-    ON CONFLICT (id) DO UPDATE SET
-      name = ${project.name},
-      updated_at = ${now},
-      bpm = ${project.bpm},
-      steps = ${project.steps},
-      tracks = ${JSON.stringify(project.tracks)},
-      pattern = ${JSON.stringify(project.pattern)},
-      chop_boundaries = ${JSON.stringify(project.chopBoundaries)}
-  `;
+  project.updatedAt = new Date().toISOString();
+  await put(`${PROJECT_PREFIX}${project.id}.json`, JSON.stringify(project), {
+    access: "public",
+    addRandomSuffix: false,
+    contentType: "application/json",
+  });
 }
 
 export async function dbDeleteProject(id: string): Promise<void> {
-  await ensureTable();
-  await sql`DELETE FROM projects WHERE id = ${id}`;
+  try {
+    const projectBlob = await head(`${PROJECT_PREFIX}${id}.json`);
+    await del(projectBlob.url);
+  } catch {}
+  try {
+    const { blobs } = await list({ prefix: `${AUDIO_PREFIX}${id}/` });
+    for (const blob of blobs) {
+      await del(blob.url);
+    }
+  } catch {}
 }
 
-export async function dbSetAudioUrl(id: string, url: string): Promise<void> {
-  await sql`UPDATE projects SET audio_url = ${url} WHERE id = ${id}`;
+export async function dbSaveAudio(id: string, file: File | Blob, filename: string): Promise<string> {
+  const blob = await put(`${AUDIO_PREFIX}${id}/${filename}`, file, {
+    access: "public",
+    addRandomSuffix: false,
+  });
+  return blob.url;
 }
 
 export async function dbGetAudioUrl(id: string): Promise<string | null> {
-  const { rows } = await sql`SELECT audio_url FROM projects WHERE id = ${id}`;
-  return rows[0]?.audio_url ?? null;
+  try {
+    const { blobs } = await list({ prefix: `${AUDIO_PREFIX}${id}/` });
+    return blobs.length > 0 ? blobs[0].url : null;
+  } catch {
+    return null;
+  }
 }

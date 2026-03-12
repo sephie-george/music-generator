@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { dbGetProject, dbSaveProject, dbDeleteProject, dbGetAudioUrl } from "@/lib/db";
-import { del } from "@vercel/blob";
+import { dbGetProject, dbSaveProject, dbDeleteProject } from "@/lib/db";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -19,11 +18,6 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  // Delete audio blob if exists
-  const audioUrl = await dbGetAudioUrl(id);
-  if (audioUrl) {
-    try { await del(audioUrl); } catch {}
-  }
   await dbDeleteProject(id);
   return NextResponse.json({ ok: true });
 }
