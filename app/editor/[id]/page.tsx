@@ -60,6 +60,9 @@ export default function EditorPage() {
   const [promptText, setPromptText] = useState("");
   const [masterDelay, setMasterDelay] = useState<DelayPreset>("none");
   const [masterReverb, setMasterReverb] = useState<ReverbPreset>("none");
+  const [masterCrusherOn, setMasterCrusherOn] = useState(false);
+  const [masterCrusherBits, setMasterCrusherBits] = useState(8);
+  const [masterPitch, setMasterPitchState] = useState(0);
   const [sensitivity, setSensitivity] = useState<"soft" | "medium" | "hard">("medium");
   const [chopMode, setChopMode] = useState<"transient" | "equal" | "fine">("transient");
   const [isDragging, setIsDragging] = useState(false);
@@ -1168,6 +1171,53 @@ export default function EditorPage() {
                         </select>
                       )}
                     </div>
+                    {/* Bitcrusher toggle + bits */}
+                    <div className="flex items-center gap-0">
+                      <button
+                        onClick={() => {
+                          const on = !masterCrusherOn;
+                          setMasterCrusherOn(on);
+                          engineRef.current?.setMasterCrusher(on ? masterCrusherBits : 16, on ? 1 : 0);
+                        }}
+                        title="Toggle bitcrusher"
+                        className={`px-1 py-0.5 rounded-l text-[9px] font-bold border ${
+                          masterCrusherOn
+                            ? "bg-rose-500/20 text-rose-400 border-rose-500/30"
+                            : "text-muted-foreground hover:text-foreground border-transparent hover:border-border"
+                        }`}
+                        style={{ fontFamily: "var(--font-mono)" }}
+                      >
+                        B
+                      </button>
+                      {masterCrusherOn && (
+                        <select
+                          value={masterCrusherBits}
+                          onChange={(e) => {
+                            const b = Number(e.target.value);
+                            setMasterCrusherBits(b);
+                            engineRef.current?.setMasterCrusher(b, 1);
+                          }}
+                          className="w-[38px] px-0 py-0.5 rounded-r bg-rose-500/10 border border-l-0 border-rose-500/20 text-[9px] text-rose-400 focus:outline-none"
+                        >
+                          {[1,2,3,4,5,6,8,10,12].map((b) => (
+                            <option key={b} value={b}>{b}bit</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                    {/* Master Pitch */}
+                    <input
+                      type="number"
+                      value={masterPitch}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        setMasterPitchState(v);
+                        engineRef.current?.setMasterPitch(v);
+                      }}
+                      title="Master pitch (semitones)"
+                      className="w-[32px] px-0.5 py-0.5 rounded bg-transparent border border-transparent hover:border-border text-[10px] text-center focus:outline-none focus:ring-1 focus:ring-ring"
+                      style={{ fontFamily: "var(--font-mono)" }}
+                    />
                   </div>
                 </div>
 

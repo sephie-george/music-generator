@@ -44,6 +44,8 @@ export class AudioEngine {
   private masterGain: any = null;
   private masterDelay: any = null;
   private masterReverb: any = null;
+  private masterCrusher: any = null;
+  private masterPitch: any = null;
 
   async init() {
     const T = await getTone();
@@ -55,9 +57,15 @@ export class AudioEngine {
     this.masterDelay.wet.value = 0;
     this.masterReverb = new T.Reverb(0.01);
     this.masterReverb.wet.value = 0;
+    this.masterCrusher = new T.BitCrusher(16);
+    this.masterCrusher.wet.value = 0;
+    this.masterPitch = new T.PitchShift(0);
+    this.masterPitch.wet.value = 0;
     this.masterGain = new T.Gain(1);
     this.masterDelay.connect(this.masterReverb);
-    this.masterReverb.connect(this.masterGain);
+    this.masterReverb.connect(this.masterCrusher);
+    this.masterCrusher.connect(this.masterPitch);
+    this.masterPitch.connect(this.masterGain);
     this.masterGain.connect(T.getDestination());
 
     this.initialized = true;
@@ -420,10 +428,26 @@ export class AudioEngine {
     const newReverb = new T.Reverb(config.decay);
     newReverb.wet.value = config.wet;
     this.masterDelay.disconnect();
+    oldReverb.disconnect();
     oldReverb.dispose();
     this.masterDelay.connect(newReverb);
-    newReverb.connect(this.masterGain);
+    newReverb.connect(this.masterCrusher);
     this.masterReverb = newReverb;
+
+  }
+
+  // BitCrusher: bits = 1-16 (lower = more crushed), wet 0-1
+  setMasterCrusher(bits: number, wet: number) {
+    if (!this.masterCrusher) return;
+    this.masterCrusher.bits.value = bits;
+    this.masterCrusher.wet.value = wet;
+  }
+
+  // Master pitch in semitones
+  setMasterPitch(semitones: number) {
+    if (!this.masterPitch) return;
+    this.masterPitch.pitch = semitones;
+    this.masterPitch.wet.value = semitones === 0 ? 0 : 1;
   }
 
   setMasterVolume(volume: number) {
