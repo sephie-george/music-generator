@@ -1,4 +1,4 @@
-import { put, del, list, head } from "@vercel/blob";
+import { put, del, list } from "@vercel/blob";
 import type { ProjectData, ProjectMeta, TrackState } from "../types";
 
 function defaultTracks(): TrackState[] {
@@ -46,8 +46,9 @@ export async function dbGetProjectList(): Promise<ProjectMeta[]> {
 
 export async function dbGetProject(id: string): Promise<ProjectData | null> {
   try {
-    const blobInfo = await head(`${PROJECT_PREFIX}${id}.json`);
-    const res = await fetch(blobInfo.url);
+    const { blobs } = await list({ prefix: `${PROJECT_PREFIX}${id}.json` });
+    if (blobs.length === 0) return null;
+    const res = await fetch(blobs[0].url);
     return await res.json();
   } catch {
     return null;
@@ -86,14 +87,12 @@ export async function dbSaveProject(project: ProjectData): Promise<void> {
 
 export async function dbDeleteProject(id: string): Promise<void> {
   try {
-    const projectBlob = await head(`${PROJECT_PREFIX}${id}.json`);
-    await del(projectBlob.url);
+    const { blobs } = await list({ prefix: `${PROJECT_PREFIX}${id}.json` });
+    for (const blob of blobs) await del(blob.url);
   } catch {}
   try {
     const { blobs } = await list({ prefix: `${AUDIO_PREFIX}${id}/` });
-    for (const blob of blobs) {
-      await del(blob.url);
-    }
+    for (const blob of blobs) await del(blob.url);
   } catch {}
 }
 

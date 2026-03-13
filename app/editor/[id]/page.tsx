@@ -75,6 +75,7 @@ export default function EditorPage() {
 
   const engineRef = useRef<AudioEngine | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const loadedRef = useRef(false);
 
   // Load project
   useEffect(() => {
@@ -92,6 +93,7 @@ export default function EditorPage() {
     setTrackMutes(p.tracks.map((t) => t.muted));
     setTrackPitches(p.tracks.map((t) => (t as any).pitch ?? 0));
     setTrackHalfSpeed(p.tracks.map((t) => (t as any).halfSpeed ?? false));
+    loadedRef.current = true;
 
     // Try to reload audio from server
     getAudioBlob(projectId).then(async (blob) => {
@@ -120,7 +122,7 @@ export default function EditorPage() {
   // Autosave: debounced save on any change
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (!project) return;
+    if (!project || !loadedRef.current) return;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(async () => {
       const updated: ProjectData = {
