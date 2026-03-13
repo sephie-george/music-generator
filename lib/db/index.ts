@@ -1,5 +1,5 @@
 import { put, del, list } from "@vercel/blob";
-import type { ProjectData, ProjectMeta, TrackState } from "../types";
+import type { ProjectData, ProjectMeta, TrackState, LaneState } from "../types";
 
 function defaultTracks(): TrackState[] {
   return Array.from({ length: 16 }, () => ({
@@ -15,6 +15,10 @@ function defaultTracks(): TrackState[] {
 
 function emptyPattern(): number[][] {
   return Array.from({ length: 16 }, () => Array(32).fill(-1));
+}
+
+function defaultLane(): LaneState {
+  return { tracks: defaultTracks(), pattern: emptyPattern(), chopBoundaries: [] };
 }
 
 const PROJECT_PREFIX = "projects/";
@@ -33,7 +37,9 @@ export async function dbGetProjectList(): Promise<ProjectMeta[]> {
         name: data.name,
         createdAt: data.createdAt,
         updatedAt: data.updatedAt,
-        chopCount: data.chopBoundaries?.length ?? 0,
+        chopCount: data.lanes
+          ? (data.lanes[0]?.chopBoundaries?.length ?? 0) + (data.lanes[1]?.chopBoundaries?.length ?? 0)
+          : data.chopBoundaries?.length ?? 0,
       });
     } catch {
       // skip corrupted blobs
@@ -64,9 +70,7 @@ export async function dbCreateProject(id: string, name: string): Promise<Project
     updatedAt: now,
     bpm: 120,
     steps: 32,
-    tracks: defaultTracks(),
-    pattern: emptyPattern(),
-    chopBoundaries: [],
+    lanes: [defaultLane(), defaultLane()],
   };
   await put(`${PROJECT_PREFIX}${id}.json`, JSON.stringify(project), {
     access: "public",
@@ -96,18 +100,25 @@ export async function dbDeleteProject(id: string): Promise<void> {
   } catch {}
 }
 
-export async function dbSaveAudio(id: string, file: File | Blob, filename: string): Promise<string> {
-  const blob = await put(`${AUDIO_PREFIX}${id}/${filename}`, file, {
+export async function dbSaveAudio(id: string, file: File | Blob, filename: string, lane: number = 0): Promise<string> {
+  const blob = await put(`${AUDIO_PREFIX}${id}/lane${lane}/${filename}`, file, {
     access: "public",
     addRandomSuffix: false,
   });
   return blob.url;
 }
 
-export async function dbGetAudioUrl(id: string): Promise<string | null> {
+export async function dbGetAudioUrl(id: string, lane: number = 0): Promise<string | null> {
   try {
-    const { blobs } = await list({ prefix: `${AUDIO_PREFIX}${id}/` });
-    return blobs.length > 0 ? blobs[0].url : null;
+    const { blobs } = await list({ prefix: `${AUDIO_PREFIX}${id}/lane${lane}/` });
+    if (blobs.length > 0) return blobs[0].url;
+    // Fallback: check legacy path (no lane prefix)
+    if (lane === 0) {
+      const { blobs: legacy } = await list({ prefix: `${AUDIO_PREFIX}${id}/` });
+      const legacyBlob = legacy.find(b => !b.pathname.includes("/lane"));
+      if (legacyBlob) return legacyBlob.url;
+    }
+    return null;
   } catch {
     return null;
   }

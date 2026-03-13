@@ -346,6 +346,50 @@ export class AudioEngine {
     this.isPlaying = false;
   }
 
+  // Start sequence only (for multi-engine sync — transport managed externally)
+  async startSequence() {
+    const T = await getTone();
+    if (this.isPlaying) return;
+    await T.start();
+
+    if (this.sequence) this.sequence.dispose();
+
+    const stepIndices = Array.from({ length: this._steps }, (_, i) => i);
+    this.sequence = new T.Sequence(
+      (time: number, step: number) => {
+        this.currentStep = step;
+        this.onStepCallback?.(step);
+        for (let t = 0; t < 16; t++) {
+          if (this.pattern[t] && this.pattern[t][step] >= 0) {
+            const track = this.tracks[t];
+            if (track?.player) {
+              try { track.player.stop(time); track.player.start(time); } catch {}
+            }
+          }
+        }
+      },
+      stepIndices,
+      "16n"
+    );
+    this.sequence.loop = true;
+    this.sequence.start(0);
+    this.isPlaying = true;
+  }
+
+  // Stop sequence only (transport managed externally)
+  stopSequence() {
+    if (this.sequence) this.sequence.stop();
+    for (let i = 0; i < 16; i++) {
+      const track = this.tracks[i];
+      if (track?.player) {
+        try { track.player.stop(); } catch {}
+      }
+    }
+    this.isPlaying = false;
+    this.currentStep = -1;
+    this.onStepCallback?.(-1);
+  }
+
   get playing() {
     return this.isPlaying;
   }

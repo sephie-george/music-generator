@@ -20,6 +20,12 @@ export interface TrackState {
   halfSpeed: boolean;
 }
 
+export interface LaneState {
+  tracks: TrackState[];
+  pattern: number[][]; // 16 tracks × 32 steps, value = chopIndex or -1
+  chopBoundaries: { start: number; end: number }[];
+}
+
 export interface ProjectData {
   id: string;
   name: string;
@@ -27,9 +33,12 @@ export interface ProjectData {
   updatedAt: string;
   bpm: number;
   steps: number;
-  tracks: TrackState[];
-  pattern: number[][]; // 16 tracks × 32 steps, value = chopIndex or -1
-  chopBoundaries: { start: number; end: number }[];
+  // Legacy single-lane fields (for backward compat on load)
+  tracks?: TrackState[];
+  pattern?: number[][];
+  chopBoundaries?: { start: number; end: number }[];
+  // Multi-lane
+  lanes?: [LaneState, LaneState];
 }
 
 export interface ProjectMeta {

@@ -41,17 +41,17 @@ export async function renameProject(id: string, name: string): Promise<void> {
   }
 }
 
-export async function saveAudioBlob(projectId: string, blob: Blob): Promise<void> {
+export async function saveAudioBlob(projectId: string, blob: Blob, lane: number = 0): Promise<void> {
   const formData = new FormData();
   formData.append("file", blob);
-  await fetch(`/api/projects/${projectId}/audio`, {
+  await fetch(`/api/projects/${projectId}/audio?lane=${lane}`, {
     method: "POST",
     body: formData,
   });
 }
 
-export async function getAudioBlob(projectId: string): Promise<Blob | undefined> {
-  const res = await fetch(`/api/projects/${projectId}/audio`);
+export async function getAudioBlob(projectId: string, lane: number = 0): Promise<Blob | undefined> {
+  const res = await fetch(`/api/projects/${projectId}/audio?lane=${lane}`);
   if (!res.ok) return undefined;
   return res.blob();
 }

@@ -33,6 +33,38 @@ import { detectTransients, chopEqual } from "@/lib/audio/transient-detector";
 import { generatePattern, generateFromPrompt } from "@/lib/audio/pattern-generator";
 import { AudioEngine } from "@/lib/audio/engine";
 
+interface LaneSnapshot {
+  audioBuffer: AudioBuffer | null;
+  fileName: string;
+  chops: Chop[];
+  pattern: number[][];
+  trackChops: number[];
+  trackEffects: { delay: DelayPreset; reverb: ReverbPreset }[];
+  trackMutes: boolean[];
+  trackSolos: boolean[];
+  trackPitches: number[];
+  trackHalfSpeed: boolean[];
+  chopMode: "transient" | "equal" | "fine";
+  sensitivity: "soft" | "medium" | "hard";
+}
+
+function defaultSnapshot(): LaneSnapshot {
+  return {
+    audioBuffer: null,
+    fileName: "",
+    chops: [],
+    pattern: Array.from({ length: 16 }, () => Array(32).fill(-1)),
+    trackChops: Array(16).fill(-1),
+    trackEffects: Array.from({ length: 16 }, () => ({ delay: "none" as DelayPreset, reverb: "none" as ReverbPreset })),
+    trackMutes: Array(16).fill(false),
+    trackSolos: Array(16).fill(false),
+    trackPitches: Array(16).fill(0),
+    trackHalfSpeed: Array(16).fill(false),
+    chopMode: "transient" as const,
+    sensitivity: "medium" as const,
+  };
+}
+
 export default function EditorPage() {
   const params = useParams();
   const router = useRouter();
@@ -71,14 +103,77 @@ export default function EditorPage() {
   const [exporting, setExporting] = useState(false);
   const [playingSource, setPlayingSource] = useState(false);
 
+  // Lane state
+  const [activeLane, setActiveLane] = useState(0);
+  const [playMode, setPlayMode] = useState<"both" | 0 | 1>("both");
+
   // Mouse drag painting state
   const [isPainting, setIsPainting] = useState(false);
   const paintModeRef = useRef<"add" | "remove">("add");
   const paintedCellsRef = useRef<Set<string>>(new Set());
 
-  const engineRef = useRef<AudioEngine | null>(null);
+  const engineRefs = [useRef<AudioEngine | null>(null), useRef<AudioEngine | null>(null)];
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const loadedRef = useRef(false);
+  const lanesRef = useRef<[LaneSnapshot, LaneSnapshot]>([defaultSnapshot(), defaultSnapshot()]);
+
+  // Helper: get current React state as a LaneSnapshot
+  const getCurrentSnapshot = (): LaneSnapshot => ({
+    audioBuffer,
+    fileName,
+    chops,
+    pattern,
+    trackChops,
+    trackEffects,
+    trackMutes,
+    trackSolos,
+    trackPitches,
+    trackHalfSpeed,
+    chopMode,
+    sensitivity,
+  });
+
+  // Helper: sync current React state into lanesRef for the active lane
+  const syncCurrentToRef = () => {
+    lanesRef.current[activeLane] = getCurrentSnapshot();
+  };
+
+  // Lane switching
+  const switchLane = (newLane: number) => {
+    if (newLane === activeLane) return;
+    // Save current state to ref
+    lanesRef.current[activeLane] = getCurrentSnapshot();
+    // Load new lane
+    const lane = lanesRef.current[newLane];
+    setAudioBuffer(lane.audioBuffer);
+    setFileName(lane.fileName);
+    setChops(lane.chops);
+    setPattern(lane.pattern);
+    setTrackChops(lane.trackChops);
+    setTrackEffects(lane.trackEffects);
+    setTrackMutes(lane.trackMutes);
+    setTrackSolos(lane.trackSolos);
+    setTrackPitches(lane.trackPitches);
+    setTrackHalfSpeed(lane.trackHalfSpeed);
+    setChopMode(lane.chopMode);
+    setSensitivity(lane.sensitivity);
+    setActiveLane(newLane);
+  };
+
+  // Build a LaneState (for persistence) from a LaneSnapshot
+  const buildLaneState = (snap: LaneSnapshot) => ({
+    tracks: Array.from({ length: 16 }, (_, i) => ({
+      chopIndex: snap.trackChops[i],
+      delay: snap.trackEffects[i].delay,
+      reverb: snap.trackEffects[i].reverb,
+      volume: 0.8,
+      muted: snap.trackMutes[i],
+      pitch: snap.trackPitches[i],
+      halfSpeed: snap.trackHalfSpeed[i],
+    })),
+    pattern: snap.pattern,
+    chopBoundaries: snap.chops.map((c) => ({ start: c.start, end: c.end })),
+  });
 
   // Load project
   useEffect(() => {
@@ -90,16 +185,37 @@ export default function EditorPage() {
     }
     setProject(p);
     setBpm(p.bpm);
-    setPattern(p.pattern);
-    setTrackChops(p.tracks.map((t) => t.chopIndex));
-    setTrackEffects(p.tracks.map((t) => ({ delay: t.delay, reverb: t.reverb })));
-    setTrackMutes(p.tracks.map((t) => t.muted));
-    setTrackPitches(p.tracks.map((t) => (t as any).pitch ?? 0));
-    setTrackHalfSpeed(p.tracks.map((t) => (t as any).halfSpeed ?? false));
+
+    // Determine lane data (backward compat)
+    const lane0Data = p.lanes?.[0] ?? (p.tracks ? { tracks: p.tracks, pattern: p.pattern || Array.from({ length: 16 }, () => Array(32).fill(-1)), chopBoundaries: p.chopBoundaries || [] } : null);
+    const lane1Data = p.lanes?.[1] ?? null;
+
+    // Load lane 0 into React state (active lane starts at 0)
+    if (lane0Data) {
+      setPattern(lane0Data.pattern);
+      setTrackChops(lane0Data.tracks.map((t) => t.chopIndex));
+      setTrackEffects(lane0Data.tracks.map((t) => ({ delay: t.delay, reverb: t.reverb })));
+      setTrackMutes(lane0Data.tracks.map((t) => t.muted));
+      setTrackPitches(lane0Data.tracks.map((t) => (t as any).pitch ?? 0));
+      setTrackHalfSpeed(lane0Data.tracks.map((t) => (t as any).halfSpeed ?? false));
+    }
+
+    // Store lane 1 data in ref
+    if (lane1Data) {
+      const snap1 = defaultSnapshot();
+      snap1.pattern = lane1Data.pattern;
+      snap1.trackChops = lane1Data.tracks.map((t) => t.chopIndex);
+      snap1.trackEffects = lane1Data.tracks.map((t) => ({ delay: t.delay, reverb: t.reverb }));
+      snap1.trackMutes = lane1Data.tracks.map((t) => t.muted);
+      snap1.trackPitches = lane1Data.tracks.map((t) => (t as any).pitch ?? 0);
+      snap1.trackHalfSpeed = lane1Data.tracks.map((t) => (t as any).halfSpeed ?? false);
+      lanesRef.current[1] = snap1;
+    }
+
     loadedRef.current = true;
 
-    // Try to reload audio from server
-    getAudioBlob(projectId).then(async (blob) => {
+    // Try to reload audio for lane 0
+    getAudioBlob(projectId, 0).then(async (blob) => {
       if (blob) {
         const arrayBuffer = await blob.arrayBuffer();
         const audioCtx = new AudioContext();
@@ -108,17 +224,35 @@ export default function EditorPage() {
         setFileName("(saved audio)");
 
         // Rechop if boundaries exist
-        if (p.chopBoundaries.length > 0) {
+        if (lane0Data && lane0Data.chopBoundaries.length > 0) {
           const detectedChops = detectTransients(buffer);
           setChops(detectedChops);
-          await initEngine(buffer, detectedChops, p);
+          await initEngine(buffer, detectedChops, 0, p, lane0Data);
+        }
+      }
+    });
+
+    // Try to reload audio for lane 1
+    getAudioBlob(projectId, 1).then(async (blob) => {
+      if (blob) {
+        const arrayBuffer = await blob.arrayBuffer();
+        const audioCtx = new AudioContext();
+        const buffer = await audioCtx.decodeAudioData(arrayBuffer);
+        lanesRef.current[1].audioBuffer = buffer;
+        lanesRef.current[1].fileName = "(saved audio)";
+
+        if (lane1Data && lane1Data.chopBoundaries.length > 0) {
+          const detectedChops = detectTransients(buffer);
+          lanesRef.current[1].chops = detectedChops;
+          await initEngine(buffer, detectedChops, 1, p, lane1Data);
         }
       }
     });
     })();
 
     return () => {
-      engineRef.current?.dispose();
+      engineRefs[0].current?.dispose();
+      engineRefs[1].current?.dispose();
     };
   }, [projectId]);
 
@@ -128,20 +262,15 @@ export default function EditorPage() {
     if (!project || !loadedRef.current) return;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(async () => {
+      // Sync current state to lanesRef
+      lanesRef.current[activeLane] = getCurrentSnapshot();
       const updated: ProjectData = {
         ...project,
         bpm,
-        pattern,
-        tracks: Array.from({ length: 16 }, (_, i) => ({
-          chopIndex: trackChops[i],
-          delay: trackEffects[i].delay,
-          reverb: trackEffects[i].reverb,
-          volume: 0.8,
-          muted: trackMutes[i],
-          pitch: trackPitches[i],
-          halfSpeed: trackHalfSpeed[i],
-        })),
-        chopBoundaries: chops.map((c) => ({ start: c.start, end: c.end })),
+        lanes: [
+          buildLaneState(lanesRef.current[0]),
+          buildLaneState(lanesRef.current[1]),
+        ],
       };
       await saveProject(updated);
       setProject(updated);
@@ -149,7 +278,7 @@ export default function EditorPage() {
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
-  }, [bpm, pattern, trackChops, trackEffects, trackMutes, trackPitches, trackHalfSpeed, chops]);
+  }, [bpm, pattern, trackChops, trackEffects, trackMutes, trackPitches, trackHalfSpeed, chops, activeLane]);
 
   // Draw waveform
   useEffect(() => {
@@ -160,7 +289,9 @@ export default function EditorPage() {
   const initEngine = async (
     buffer: AudioBuffer,
     chopList: Chop[],
-    proj?: ProjectData
+    laneIdx: number,
+    proj?: ProjectData,
+    laneData?: { tracks: any[]; pattern: number[][]; chopBoundaries: { start: number; end: number }[] }
   ) => {
     const engine = new AudioEngine();
     await engine.init();
@@ -169,27 +300,33 @@ export default function EditorPage() {
       chopList.map((c) => ({ start: c.start, end: c.end }))
     );
 
-    // Setup tracks
-    const tChops = proj?.tracks.map((t) => t.chopIndex) || trackChops;
+    // Determine track data to use
+    const tracks = laneData?.tracks ?? proj?.lanes?.[laneIdx]?.tracks ?? (laneIdx === 0 ? proj?.tracks : undefined);
+    const tChops = tracks?.map((t: any) => t.chopIndex) || (laneIdx === activeLane ? trackChops : lanesRef.current[laneIdx].trackChops);
+
     for (let i = 0; i < 16; i++) {
       if (tChops[i] >= 0 && tChops[i] < chopList.length) {
         await engine.setupTrack(i, tChops[i]);
-        if (proj?.tracks[i]) {
-          await engine.setTrackDelay(i, proj.tracks[i].delay);
-          await engine.setTrackReverb(i, proj.tracks[i].reverb);
-          engine.setTrackPitch(i, (proj.tracks[i] as any).pitch ?? 0);
-          engine.setTrackHalfSpeed(i, (proj.tracks[i] as any).halfSpeed ?? false);
+        if (tracks?.[i]) {
+          await engine.setTrackDelay(i, tracks[i].delay);
+          await engine.setTrackReverb(i, tracks[i].reverb);
+          engine.setTrackPitch(i, (tracks[i] as any).pitch ?? 0);
+          engine.setTrackHalfSpeed(i, (tracks[i] as any).halfSpeed ?? false);
         }
       }
     }
 
-    const pat = proj?.pattern || pattern;
+    const pat = laneData?.pattern ?? proj?.lanes?.[laneIdx]?.pattern ?? (laneIdx === activeLane ? pattern : lanesRef.current[laneIdx].pattern);
     engine.setPattern(pat);
     engine.bpm = proj?.bpm || bpm;
-    engine.onStep((step) => setCurrentStep(step));
 
-    engineRef.current?.dispose();
-    engineRef.current = engine;
+    // Only the active lane (or lane 0 if both) drives the step indicator
+    if (laneIdx === 0) {
+      engine.onStep((step) => setCurrentStep(step));
+    }
+
+    engineRefs[laneIdx].current?.dispose();
+    engineRefs[laneIdx].current = engine;
   };
 
   // Handle file upload
@@ -204,8 +341,8 @@ export default function EditorPage() {
       const buffer = await audioCtx.decodeAudioData(arrayBuffer);
       setAudioBuffer(buffer);
 
-      // Save audio blob
-      await saveAudioBlob(projectId, file);
+      // Save audio blob with lane index
+      await saveAudioBlob(projectId, file, activeLane);
 
       // Detect transients
       const detectedChops = detectTransients(buffer);
@@ -218,12 +355,12 @@ export default function EditorPage() {
       }
       setTrackChops(newTrackChops);
 
-      await initEngine(buffer, detectedChops);
+      await initEngine(buffer, detectedChops, activeLane);
 
       // Update track assignments in engine
       for (let i = 0; i < 16; i++) {
         if (newTrackChops[i] >= 0) {
-          await engineRef.current?.setupTrack(i, newTrackChops[i]);
+          await engineRefs[activeLane].current?.setupTrack(i, newTrackChops[i]);
         }
       }
     } catch (err) {
@@ -249,11 +386,11 @@ export default function EditorPage() {
     const wasActive = newPattern[track][step] >= 0;
     newPattern[track][step] = wasActive ? -1 : chopIdx;
     setPattern(newPattern);
-    engineRef.current?.setPattern(newPattern);
+    engineRefs[activeLane].current?.setPattern(newPattern);
 
     // Preview sound when adding a note
     if (!wasActive) {
-      engineRef.current?.triggerTrack(track);
+      engineRefs[activeLane].current?.triggerTrack(track);
     }
   };
 
@@ -301,10 +438,10 @@ export default function EditorPage() {
     setTrackChops(newTrackChops);
 
     if (chopIndex >= 0) {
-      await engineRef.current?.setupTrack(track, chopIndex);
+      await engineRefs[activeLane].current?.setupTrack(track, chopIndex);
       // Apply current effects
-      await engineRef.current?.setTrackDelay(track, trackEffects[track].delay);
-      await engineRef.current?.setTrackReverb(track, trackEffects[track].reverb);
+      await engineRefs[activeLane].current?.setTrackDelay(track, trackEffects[track].delay);
+      await engineRefs[activeLane].current?.setTrackReverb(track, trackEffects[track].reverb);
     }
 
     // Update pattern cells for this track
@@ -315,7 +452,7 @@ export default function EditorPage() {
       }
     }
     setPattern(newPattern);
-    engineRef.current?.setPattern(newPattern);
+    engineRefs[activeLane].current?.setPattern(newPattern);
   };
 
   // Effects
@@ -323,14 +460,14 @@ export default function EditorPage() {
     const newEffects = [...trackEffects];
     newEffects[track] = { ...newEffects[track], delay: preset };
     setTrackEffects(newEffects);
-    await engineRef.current?.setTrackDelay(track, preset);
+    await engineRefs[activeLane].current?.setTrackDelay(track, preset);
   };
 
   const setReverb = async (track: number, preset: ReverbPreset) => {
     const newEffects = [...trackEffects];
     newEffects[track] = { ...newEffects[track], reverb: preset };
     setTrackEffects(newEffects);
-    await engineRef.current?.setTrackReverb(track, preset);
+    await engineRefs[activeLane].current?.setTrackReverb(track, preset);
   };
 
   const toggleMute = (track: number) => {
@@ -351,7 +488,7 @@ export default function EditorPage() {
     const anySolo = solos.some(Boolean);
     for (let i = 0; i < 16; i++) {
       const shouldMute = mutes[i] || (anySolo && !solos[i]);
-      engineRef.current?.setTrackMute(i, shouldMute);
+      engineRefs[activeLane].current?.setTrackMute(i, shouldMute);
     }
   };
 
@@ -360,32 +497,59 @@ export default function EditorPage() {
     const newPitches = [...trackPitches];
     newPitches[track] = clamped;
     setTrackPitches(newPitches);
-    engineRef.current?.setTrackPitch(track, clamped);
+    engineRefs[activeLane].current?.setTrackPitch(track, clamped);
   };
 
   const toggleHalfSpeed = (track: number) => {
     const newHalf = [...trackHalfSpeed];
     newHalf[track] = !newHalf[track];
     setTrackHalfSpeed(newHalf);
-    engineRef.current?.setTrackHalfSpeed(track, newHalf[track]);
+    engineRefs[activeLane].current?.setTrackHalfSpeed(track, newHalf[track]);
   };
 
   // Transport
   const handlePlay = async () => {
-    if (!engineRef.current) return;
-    engineRef.current.setPattern(pattern);
-    engineRef.current.bpm = bpm;
-    await engineRef.current.play();
+    const T = await import("tone");
+    T.getTransport().bpm.value = bpm;
+
+    // Sync current state to ref so we have the latest pattern for both lanes
+    lanesRef.current[activeLane] = getCurrentSnapshot();
+
+    if (playMode === "both" || playMode === 0) {
+      if (engineRefs[0].current) {
+        engineRefs[0].current.bpm = bpm;
+        engineRefs[0].current.setPattern(lanesRef.current[0].pattern);
+        await engineRefs[0].current.startSequence();
+      }
+    }
+    if (playMode === "both" || playMode === 1) {
+      if (engineRefs[1].current) {
+        engineRefs[1].current.bpm = bpm;
+        engineRefs[1].current.setPattern(lanesRef.current[1].pattern);
+        await engineRefs[1].current.startSequence();
+      }
+    }
+
+    T.getTransport().start();
     setIsPlaying(true);
   };
 
   const handlePause = async () => {
-    await engineRef.current?.pause();
+    const T = await import("tone");
+    engineRefs[0].current?.stopSequence();
+    engineRefs[1].current?.stopSequence();
+    T.getTransport().pause();
     setIsPlaying(false);
   };
 
   const handleStop = async () => {
-    engineRef.current?.stopAll();
+    const T = await import("tone");
+    engineRefs[0].current?.stopSequence();
+    engineRefs[1].current?.stopSequence();
+    engineRefs[0].current?.stopSource();
+    engineRefs[1].current?.stopSource();
+    T.getTransport().stop();
+    T.getTransport().position = 0;
     setIsPlaying(false);
     setPlayingSource(false);
     setCurrentStep(-1);
@@ -394,16 +558,19 @@ export default function EditorPage() {
   // BPM change
   const handleBpmChange = (newBpm: number) => {
     setBpm(newBpm);
-    if (engineRef.current) {
-      engineRef.current.bpm = newBpm;
+    if (engineRefs[0].current) {
+      engineRefs[0].current.bpm = newBpm;
+    }
+    if (engineRefs[1].current) {
+      engineRefs[1].current.bpm = newBpm;
     }
   };
 
   // Generate
   const handleGenerate = async () => {
     if (chops.length === 0) return;
-    if (engineRef.current) {
-      engineRef.current.stopAll();
+    if (engineRefs[activeLane].current) {
+      engineRefs[activeLane].current!.stopAll();
       setIsPlaying(false);
       setPlayingSource(false);
       setCurrentStep(-1);
@@ -415,7 +582,8 @@ export default function EditorPage() {
     );
 
     setBpm(newBpm);
-    if (engineRef.current) engineRef.current.bpm = newBpm;
+    if (engineRefs[0].current) engineRefs[0].current.bpm = newBpm;
+    if (engineRefs[1].current) engineRefs[1].current.bpm = newBpm;
 
     // Merge: keep existing track chop assignments, only overwrite tracks the generator used
     const mergedChops = [...trackChops];
@@ -435,15 +603,15 @@ export default function EditorPage() {
 
     setPattern(newPattern);
     setTrackChops(mergedChops);
-    engineRef.current?.setPattern(newPattern);
+    engineRefs[activeLane].current?.setPattern(newPattern);
 
     for (let i = 0; i < 16; i++) {
       if (mergedChops[i] >= 0) {
-        await engineRef.current?.setupTrack(i, mergedChops[i]);
-        await engineRef.current?.setTrackDelay(i, trackEffects[i].delay);
-        await engineRef.current?.setTrackReverb(i, trackEffects[i].reverb);
-        engineRef.current?.setTrackPitch(i, trackPitches[i]);
-        engineRef.current?.setTrackHalfSpeed(i, trackHalfSpeed[i]);
+        await engineRefs[activeLane].current?.setupTrack(i, mergedChops[i]);
+        await engineRefs[activeLane].current?.setTrackDelay(i, trackEffects[i].delay);
+        await engineRefs[activeLane].current?.setTrackReverb(i, trackEffects[i].reverb);
+        engineRefs[activeLane].current?.setTrackPitch(i, trackPitches[i]);
+        engineRefs[activeLane].current?.setTrackHalfSpeed(i, trackHalfSpeed[i]);
       }
     }
   };
@@ -451,8 +619,8 @@ export default function EditorPage() {
   // Generate from text prompt
   const handlePromptGenerate = async () => {
     if (chops.length === 0 || !promptText.trim()) return;
-    if (engineRef.current) {
-      engineRef.current.stopAll();
+    if (engineRefs[activeLane].current) {
+      engineRefs[activeLane].current!.stopAll();
       setIsPlaying(false);
       setPlayingSource(false);
       setCurrentStep(-1);
@@ -464,7 +632,8 @@ export default function EditorPage() {
     );
 
     setBpm(newBpm);
-    if (engineRef.current) engineRef.current.bpm = newBpm;
+    if (engineRefs[0].current) engineRefs[0].current.bpm = newBpm;
+    if (engineRefs[1].current) engineRefs[1].current.bpm = newBpm;
 
     const mergedChops = [...trackChops];
     for (let i = 0; i < 16; i++) {
@@ -482,14 +651,14 @@ export default function EditorPage() {
 
     setPattern(newPattern);
     setTrackChops(mergedChops);
-    engineRef.current?.setPattern(newPattern);
+    engineRefs[activeLane].current?.setPattern(newPattern);
     for (let i = 0; i < 16; i++) {
       if (mergedChops[i] >= 0) {
-        await engineRef.current?.setupTrack(i, mergedChops[i]);
-        await engineRef.current?.setTrackDelay(i, trackEffects[i].delay);
-        await engineRef.current?.setTrackReverb(i, trackEffects[i].reverb);
-        engineRef.current?.setTrackPitch(i, trackPitches[i]);
-        engineRef.current?.setTrackHalfSpeed(i, trackHalfSpeed[i]);
+        await engineRefs[activeLane].current?.setupTrack(i, mergedChops[i]);
+        await engineRefs[activeLane].current?.setTrackDelay(i, trackEffects[i].delay);
+        await engineRefs[activeLane].current?.setTrackReverb(i, trackEffects[i].reverb);
+        engineRefs[activeLane].current?.setTrackPitch(i, trackPitches[i]);
+        engineRefs[activeLane].current?.setTrackHalfSpeed(i, trackHalfSpeed[i]);
       }
     }
   };
@@ -498,27 +667,22 @@ export default function EditorPage() {
   const handleClear = () => {
     const empty = Array.from({ length: 16 }, () => Array(32).fill(-1));
     setPattern(empty);
-    engineRef.current?.setPattern(empty);
+    engineRefs[activeLane].current?.setPattern(empty);
   };
 
   // Save
   const handleSave = async () => {
     if (!project) return;
     setSaving(true);
+    // Sync current state to lanesRef
+    lanesRef.current[activeLane] = getCurrentSnapshot();
     const updated: ProjectData = {
       ...project,
       bpm,
-      pattern,
-      tracks: Array.from({ length: 16 }, (_, i) => ({
-        chopIndex: trackChops[i],
-        delay: trackEffects[i].delay,
-        reverb: trackEffects[i].reverb,
-        volume: 0.8,
-        muted: trackMutes[i],
-        pitch: trackPitches[i],
-        halfSpeed: trackHalfSpeed[i],
-      })),
-      chopBoundaries: chops.map((c) => ({ start: c.start, end: c.end })),
+      lanes: [
+        buildLaneState(lanesRef.current[0]),
+        buildLaneState(lanesRef.current[1]),
+      ],
     };
     await saveProject(updated);
     setProject(updated);
@@ -562,13 +726,13 @@ export default function EditorPage() {
     const empty = Array.from({ length: 16 }, () => Array(32).fill(-1));
     setPattern(empty);
 
-    await initEngine(audioBuffer, newChops);
+    await initEngine(audioBuffer, newChops, activeLane);
     for (let i = 0; i < 16; i++) {
       if (newTrackChops[i] >= 0) {
-        await engineRef.current?.setupTrack(i, newTrackChops[i]);
+        await engineRefs[activeLane].current?.setupTrack(i, newTrackChops[i]);
       }
     }
-    engineRef.current?.setPattern(empty);
+    engineRefs[activeLane].current?.setPattern(empty);
   };
 
   const handleRechop = async (sens: "soft" | "medium" | "hard") => {
@@ -583,33 +747,31 @@ export default function EditorPage() {
 
   // Play original source
   const handlePlaySource = async () => {
-    if (!engineRef.current) return;
-    if (playingSource || engineRef.current.isSourcePlaying) {
-      engineRef.current.stopSource();
+    if (!engineRefs[activeLane].current) return;
+    if (playingSource || engineRefs[activeLane].current!.isSourcePlaying) {
+      engineRefs[activeLane].current!.stopSource();
       setPlayingSource(false);
     } else {
       // Stop transport if playing
       if (isPlaying) {
-        await engineRef.current.stop();
-        setIsPlaying(false);
-        setCurrentStep(-1);
+        await handleStop();
       }
-      engineRef.current.onSourceStop(() => setPlayingSource(false));
-      await engineRef.current.playSource();
+      engineRefs[activeLane].current!.onSourceStop(() => setPlayingSource(false));
+      await engineRefs[activeLane].current!.playSource();
       setPlayingSource(true);
     }
   };
 
-  // Export WAV
+  // Export WAV (active lane only)
   const handleExport = async () => {
-    if (!engineRef.current) return;
+    if (!engineRefs[activeLane].current) return;
     setExporting(true);
     try {
-      const blob = await engineRef.current.exportWAV();
+      const blob = await engineRefs[activeLane].current!.exportWAV();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${project?.name || "export"}.wav`;
+      a.download = `${project?.name || "export"}-lane${activeLane + 1}.wav`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -617,6 +779,12 @@ export default function EditorPage() {
     } finally {
       setExporting(false);
     }
+  };
+
+  // Sync master effects to both engines
+  const syncMasterToBothEngines = (action: (engine: AudioEngine) => void) => {
+    if (engineRefs[0].current) action(engineRefs[0].current);
+    if (engineRefs[1].current) action(engineRefs[1].current);
   };
 
   if (!project) return null;
@@ -663,42 +831,61 @@ export default function EditorPage() {
       </header>
 
       <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Upload zone (shown when no audio) */}
+        {/* Upload zone (shown when no audio for the active lane) */}
         {!audioBuffer && (
-          <div className="flex-1 flex items-center justify-center p-8">
-            <div
-              className={`drop-zone w-full max-w-lg border-2 border-dashed rounded-xl p-12 text-center transition-all ${
-                isDragging
-                  ? "dragging border-primary bg-primary/5"
-                  : "border-border hover:border-muted-foreground/30"
-              }`}
-              onDragOver={(e) => {
-                e.preventDefault();
-                setIsDragging(true);
-              }}
-              onDragLeave={() => setIsDragging(false)}
-              onDrop={handleDrop}
-            >
-              <Upload className="w-10 h-10 text-muted-foreground mx-auto mb-4" />
-              <p className="text-sm text-muted-foreground mb-1">
-                Drag & drop an audio file here
-              </p>
-              <p className="text-xs text-muted-foreground/60 mb-4">
-                WAV, MP3, OGG, FLAC
-              </p>
-              <label className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-secondary border border-border text-sm cursor-pointer hover:bg-secondary/80">
-                <Upload className="w-3.5 h-3.5" />
-                Browse files
-                <input
-                  type="file"
-                  accept="audio/*"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) handleFile(file);
-                  }}
-                />
-              </label>
+          <div className="flex-1 flex flex-col">
+            {/* Lane tabs above upload zone */}
+            <div className="flex items-center gap-1 px-4 pt-2">
+              {[0, 1].map((lane) => (
+                <button
+                  key={lane}
+                  onClick={() => switchLane(lane)}
+                  className={`px-3 py-1 rounded-t-md text-xs font-medium border border-b-0 ${
+                    activeLane === lane
+                      ? "bg-card border-border text-foreground"
+                      : "bg-transparent border-transparent text-muted-foreground hover:text-foreground"
+                  }`}
+                  style={{ fontFamily: "var(--font-mono)" }}
+                >
+                  Lane {lane + 1}
+                </button>
+              ))}
+            </div>
+            <div className="flex-1 flex items-center justify-center p-8">
+              <div
+                className={`drop-zone w-full max-w-lg border-2 border-dashed rounded-xl p-12 text-center transition-all ${
+                  isDragging
+                    ? "dragging border-primary bg-primary/5"
+                    : "border-border hover:border-muted-foreground/30"
+                }`}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={handleDrop}
+              >
+                <Upload className="w-10 h-10 text-muted-foreground mx-auto mb-4" />
+                <p className="text-sm text-muted-foreground mb-1">
+                  Drag & drop an audio file here
+                </p>
+                <p className="text-xs text-muted-foreground/60 mb-4">
+                  WAV, MP3, OGG, FLAC
+                </p>
+                <label className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-secondary border border-border text-sm cursor-pointer hover:bg-secondary/80">
+                  <Upload className="w-3.5 h-3.5" />
+                  Browse files
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleFile(file);
+                    }}
+                  />
+                </label>
+              </div>
             </div>
           </div>
         )}
@@ -718,6 +905,24 @@ export default function EditorPage() {
         {/* Editor */}
         {audioBuffer && !isLoading && (
           <div className="flex-1 flex flex-col overflow-hidden">
+            {/* Lane tabs */}
+            <div className="flex items-center gap-1 px-4 pt-2">
+              {[0, 1].map((lane) => (
+                <button
+                  key={lane}
+                  onClick={() => switchLane(lane)}
+                  className={`px-3 py-1 rounded-t-md text-xs font-medium border border-b-0 ${
+                    activeLane === lane
+                      ? "bg-card border-border text-foreground"
+                      : "bg-transparent border-transparent text-muted-foreground hover:text-foreground"
+                  }`}
+                  style={{ fontFamily: "var(--font-mono)" }}
+                >
+                  Lane {lane + 1}
+                </button>
+              ))}
+            </div>
+
             {/* Waveform + chops info */}
             <div className="border-b border-border/50 px-4 py-3">
               <div className="flex items-center justify-between mb-2">
@@ -830,6 +1035,24 @@ export default function EditorPage() {
                 >
                   <Square className="w-4 h-4" />
                 </button>
+              </div>
+
+              {/* Play mode selector */}
+              <div className="flex items-center gap-0.5 border border-border rounded-md">
+                {([0, "both", 1] as const).map((mode) => (
+                  <button
+                    key={String(mode)}
+                    onClick={() => setPlayMode(mode)}
+                    className={`px-2 py-1 text-[10px] font-medium ${
+                      playMode === mode
+                        ? "bg-primary/20 text-primary"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    style={{ fontFamily: "var(--font-mono)" }}
+                  >
+                    {mode === "both" ? "1+2" : `L${(mode as number) + 1}`}
+                  </button>
+                ))}
               </div>
 
               <div className="w-px h-6 bg-border" />
@@ -1101,7 +1324,7 @@ export default function EditorPage() {
                         onClick={() => {
                           const v = masterDelay === "none" ? "eighth" : "none";
                           setMasterDelay(v);
-                          engineRef.current?.setMasterDelay(v);
+                          syncMasterToBothEngines((e) => e.setMasterDelay(v));
                         }}
                         title="Toggle master delay"
                         className={`px-1 py-0.5 rounded-l text-[9px] font-bold border ${
@@ -1119,7 +1342,7 @@ export default function EditorPage() {
                           onChange={(e) => {
                             const v = e.target.value as DelayPreset;
                             setMasterDelay(v);
-                            engineRef.current?.setMasterDelay(v);
+                            syncMasterToBothEngines((eng) => eng.setMasterDelay(v));
                           }}
                           className="w-[44px] px-0 py-0.5 rounded-r bg-blue-500/10 border border-l-0 border-blue-500/20 text-[9px] text-blue-400 focus:outline-none truncate"
                         >
@@ -1139,7 +1362,7 @@ export default function EditorPage() {
                         onClick={() => {
                           const v = masterReverb === "none" ? "hall" : "none";
                           setMasterReverb(v);
-                          engineRef.current?.setMasterReverb(v);
+                          syncMasterToBothEngines((e) => e.setMasterReverb(v));
                         }}
                         title="Toggle master reverb"
                         className={`px-1 py-0.5 rounded-l text-[9px] font-bold border ${
@@ -1157,7 +1380,7 @@ export default function EditorPage() {
                           onChange={(e) => {
                             const v = e.target.value as ReverbPreset;
                             setMasterReverb(v);
-                            engineRef.current?.setMasterReverb(v);
+                            syncMasterToBothEngines((eng) => eng.setMasterReverb(v));
                           }}
                           className="w-[44px] px-0 py-0.5 rounded-r bg-emerald-500/10 border border-l-0 border-emerald-500/20 text-[9px] text-emerald-400 focus:outline-none truncate"
                         >
@@ -1177,7 +1400,7 @@ export default function EditorPage() {
                         onClick={() => {
                           const on = !masterCrusherOn;
                           setMasterCrusherOn(on);
-                          engineRef.current?.setMasterCrusher(on ? masterCrusherBits : 16, on ? 1 : 0);
+                          syncMasterToBothEngines((e) => e.setMasterCrusher(on ? masterCrusherBits : 16, on ? 1 : 0));
                         }}
                         title="Toggle bitcrusher"
                         className={`px-1 py-0.5 rounded-l text-[9px] font-bold border ${
@@ -1195,7 +1418,7 @@ export default function EditorPage() {
                           onChange={(e) => {
                             const b = Number(e.target.value);
                             setMasterCrusherBits(b);
-                            engineRef.current?.setMasterCrusher(b, 1);
+                            syncMasterToBothEngines((eng) => eng.setMasterCrusher(b, 1));
                           }}
                           className="w-[38px] px-0 py-0.5 rounded-r bg-rose-500/10 border border-l-0 border-rose-500/20 text-[9px] text-rose-400 focus:outline-none"
                         >
@@ -1212,7 +1435,7 @@ export default function EditorPage() {
                       onChange={(e) => {
                         const v = Number(e.target.value);
                         setMasterPitchState(v);
-                        engineRef.current?.setMasterPitch(v);
+                        syncMasterToBothEngines((eng) => eng.setMasterPitch(v));
                       }}
                       title="Master pitch (semitones)"
                       className="w-[32px] px-0.5 py-0.5 rounded bg-transparent border border-transparent hover:border-border text-[10px] text-center focus:outline-none focus:ring-1 focus:ring-ring"
