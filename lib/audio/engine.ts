@@ -18,13 +18,17 @@ async function getTone() {
 }
 
 export interface EngineTrack {
-  player: any; // Tone.Player
+  player: any; // Tone.Player or Tone.GrainPlayer
   delay: any; // Tone.FeedbackDelay
   reverb: any; // Tone.Reverb
   gain: any; // Tone.Gain
   buffer: any; // Tone.ToneAudioBuffer
   pitch: number; // semitones offset
   halfSpeed: boolean;
+  isGranular?: boolean;
+  grainSize?: number;
+  overlap?: number;
+  reverse?: boolean;
 }
 
 export class AudioEngine {
@@ -34,8 +38,8 @@ export class AudioEngine {
   private sequence: any = null; // Tone.Sequence
   private isPlaying = false;
   private _bpm = 120;
-  private _steps = 32;
-  private pattern: number[][] = Array.from({ length: 16 }, () => Array(32).fill(-1));
+  private _steps = 64;
+  private pattern: number[][] = Array.from({ length: 16 }, () => Array(64).fill(-1));
   private currentStep = -1;
   private onStepCallback: ((step: number) => void) | null = null;
   private initialized = false;
@@ -404,8 +408,8 @@ export class AudioEngine {
     } catch {}
   }
 
-  // Export to WAV
-  async exportWAV(): Promise<Blob> {
+  // Render piano roll pattern to an AudioBuffer (offline)
+  async renderToBuffer(): Promise<AudioBuffer> {
     if (!this.sourceBuffer) throw new Error("No audio loaded");
 
     const sampleRate = 44100;
@@ -413,10 +417,8 @@ export class AudioEngine {
     const totalDuration = this._steps * stepDuration;
     const totalSamples = Math.ceil(totalDuration * sampleRate);
 
-    // Create offline context
     const offlineCtx = new OfflineAudioContext(2, totalSamples, sampleRate);
 
-    // Recreate each track's audio in the offline context
     for (let t = 0; t < 16; t++) {
       const track = this.tracks[t];
       if (!track) continue;
@@ -432,7 +434,6 @@ export class AudioEngine {
 
         const time = s * stepDuration;
 
-        // Create buffer source
         const bufferSource = offlineCtx.createBufferSource();
         const srcLength = toneBuffer.length;
         const buffer = offlineCtx.createBuffer(1, srcLength, toneBuffer.sampleRate || sampleRate);
@@ -449,8 +450,40 @@ export class AudioEngine {
       }
     }
 
-    const renderedBuffer = await offlineCtx.startRendering();
+    return offlineCtx.startRendering();
+  }
+
+  // Export piano roll to WAV
+  async exportWAV(): Promise<Blob> {
+    const renderedBuffer = await this.renderToBuffer();
     return audioBufferToWav(renderedBuffer);
+  }
+
+  // Export magic soundscape to WAV
+  async exportMagicWAV(): Promise<Blob> {
+    if (!this._magicBuffer) throw new Error("No magic buffer — generate first");
+    return audioBufferToWav(this._magicBuffer);
+  }
+
+  // Merge two AudioBuffers into one (static utility)
+  static mergeBuffers(a: AudioBuffer, b: AudioBuffer): AudioBuffer {
+    const sampleRate = a.sampleRate;
+    const length = Math.max(a.length, b.length);
+    const ctx = new OfflineAudioContext(2, length, sampleRate);
+    const buffer = ctx.createBuffer(2, length, sampleRate);
+
+    // Mix both to stereo channels
+    for (let ch = 0; ch < 2; ch++) {
+      const out = buffer.getChannelData(ch);
+      const aCh = ch < a.numberOfChannels ? a.getChannelData(ch) : a.getChannelData(0);
+      const bCh = ch < b.numberOfChannels ? b.getChannelData(ch) : b.getChannelData(0);
+      for (let i = 0; i < length; i++) {
+        const va = i < a.length ? aCh[i] : 0;
+        const vb = i < b.length ? bCh[i] : 0;
+        out[i] = Math.max(-1, Math.min(1, va * 0.7 + vb * 0.7));
+      }
+    }
+    return buffer;
   }
 
   // Master effects
@@ -496,6 +529,129 @@ export class AudioEngine {
 
   setMasterVolume(volume: number) {
     if (this.masterGain) this.masterGain.gain.value = volume;
+  }
+
+  // Magic soundscape
+  private _magicPlayer: any = null;
+  private _magicBuffer: AudioBuffer | null = null;
+
+  async generateMagic(params: { stretchFactor: number; windowSize: number; layers: boolean; reverbTail: number }): Promise<AudioBuffer> {
+    if (!this.sourceBuffer) throw new Error("No audio loaded");
+
+    // Collect unique chop indices used in the current pattern
+    const usedChopSet = new Set<number>();
+    for (let t = 0; t < 16; t++) {
+      for (let s = 0; s < this._steps; s++) {
+        const v = this.pattern[t][s];
+        if (v >= 0 && v < this.chopBuffers.length) {
+          usedChopSet.add(v);
+        }
+      }
+    }
+    const usedChops = Array.from(usedChopSet).sort((a, b) => a - b);
+    if (usedChops.length === 0) throw new Error("No chops in pattern");
+
+    // Build a continuous, dense buffer from the used chops with crossfades
+    const crossfadeSamples = 512;
+    const chopArrays: Float32Array[] = usedChops.map(
+      (idx) => this.chopBuffers[idx].toArray() as Float32Array
+    );
+
+    // Calculate total length (each chop overlaps with next by crossfadeSamples)
+    let totalLength = 0;
+    for (const arr of chopArrays) totalLength += arr.length;
+    if (chopArrays.length > 1) {
+      totalLength -= crossfadeSamples * (chopArrays.length - 1);
+    }
+    // Repeat the sequence a few times for longer source material
+    const repeats = Math.max(1, Math.min(4, Math.ceil(2.0 / (totalLength / this.sourceBuffer.sampleRate))));
+    const singlePassLength = totalLength;
+    totalLength *= repeats;
+
+    const continuous = new Float32Array(totalLength);
+
+    for (let rep = 0; rep < repeats; rep++) {
+      let offset = rep * singlePassLength;
+      for (let i = 0; i < chopArrays.length; i++) {
+        const chopData = chopArrays[i];
+        for (let s = 0; s < chopData.length; s++) {
+          const pos = offset + s;
+          if (pos >= 0 && pos < totalLength) {
+            // Crossfade: fade in at the start of each chop (except first), fade out at end
+            let gain = 1;
+            if (i > 0 && s < crossfadeSamples) {
+              gain = s / crossfadeSamples; // fade in
+            }
+            if (i < chopArrays.length - 1 && s >= chopData.length - crossfadeSamples) {
+              gain = (chopData.length - s) / crossfadeSamples; // fade out
+            }
+            continuous[pos] += chopData[s] * gain;
+          }
+        }
+        offset += chopData.length - (i < chopArrays.length - 1 ? crossfadeSamples : 0);
+      }
+    }
+
+    // Normalize
+    let peak = 0;
+    for (let i = 0; i < totalLength; i++) {
+      const v = Math.abs(continuous[i]);
+      if (v > peak) peak = v;
+    }
+    if (peak > 0) {
+      const scale = 0.95 / peak;
+      for (let i = 0; i < totalLength; i++) continuous[i] *= scale;
+    }
+
+    // Create AudioBuffer from continuous data
+    const sr = this.sourceBuffer.sampleRate;
+    const offCtx = new OfflineAudioContext(1, totalLength, sr);
+    const denseBuffer = offCtx.createBuffer(1, totalLength, sr);
+    denseBuffer.getChannelData(0).set(continuous);
+
+    // Now Paulstretch the dense, tonal material
+    const { MagicSoundscape } = await import("./magic");
+    const magic = new MagicSoundscape(denseBuffer, params);
+    const result = await magic.generate();
+    this._magicBuffer = result;
+    return result;
+  }
+
+  async playMagic(): Promise<void> {
+    const T = await getTone();
+    this.stopMagic();
+    if (!this._magicBuffer) return;
+
+    const toneBuffer = new T.ToneAudioBuffer();
+    const mono = new Float32Array(this._magicBuffer.length);
+    for (let ch = 0; ch < this._magicBuffer.numberOfChannels; ch++) {
+      const data = this._magicBuffer.getChannelData(ch);
+      for (let i = 0; i < this._magicBuffer.length; i++) {
+        mono[i] += data[i] / this._magicBuffer.numberOfChannels;
+      }
+    }
+    toneBuffer.fromArray(mono);
+
+    this._magicPlayer = new T.Player(toneBuffer).toDestination();
+    this._magicPlayer.loop = true;
+    this._magicPlayer.fadeIn = 2;
+    this._magicPlayer.fadeOut = 2;
+    this._magicPlayer.start();
+  }
+
+  stopMagic() {
+    if (this._magicPlayer) {
+      try { this._magicPlayer.stop(); this._magicPlayer.dispose(); } catch {}
+      this._magicPlayer = null;
+    }
+  }
+
+  get hasMagicBuffer(): boolean {
+    return this._magicBuffer !== null;
+  }
+
+  getSourceBuffer(): AudioBuffer | null {
+    return this.sourceBuffer;
   }
 
   // Play original source audio
@@ -553,9 +709,171 @@ export class AudioEngine {
     this.stopSource();
   }
 
+  // ── Advanced vocal effects ──
+
+  // Switch a track to granular playback mode (GrainPlayer)
+  async setTrackGranular(trackIndex: number, enabled: boolean, grainSize: number = 0.05, overlap: number = 0.5) {
+    const T = await getTone();
+    const track = this.tracks[trackIndex];
+    if (!track) return;
+
+    if (enabled && !track.isGranular) {
+      // Replace Player with GrainPlayer
+      const oldPlayer = track.player;
+      const grainPlayer = new T.GrainPlayer(track.buffer);
+      grainPlayer.grainSize = grainSize;
+      grainPlayer.overlap = overlap;
+      grainPlayer.loop = false;
+
+      // Rewire chain
+      oldPlayer.disconnect();
+      oldPlayer.dispose();
+      grainPlayer.connect(track.delay);
+      track.player = grainPlayer;
+      track.isGranular = true;
+      track.grainSize = grainSize;
+      track.overlap = overlap;
+      this.applyPlaybackRate(trackIndex);
+    } else if (!enabled && track.isGranular) {
+      // Replace GrainPlayer back with Player
+      const oldPlayer = track.player;
+      const player = new T.Player(track.buffer);
+      player.fadeIn = 0.003;
+      player.fadeOut = 0.01;
+
+      oldPlayer.disconnect();
+      oldPlayer.dispose();
+      player.connect(track.delay);
+      track.player = player;
+      track.isGranular = false;
+      this.applyPlaybackRate(trackIndex);
+    } else if (enabled && track.isGranular) {
+      // Just update parameters
+      track.player.grainSize = grainSize;
+      track.player.overlap = overlap;
+      track.grainSize = grainSize;
+      track.overlap = overlap;
+    }
+  }
+
+  // Reverse a track's buffer
+  async setTrackReverse(trackIndex: number, reversed: boolean) {
+    const T = await getTone();
+    const track = this.tracks[trackIndex];
+    if (!track) return;
+    track.reverse = reversed;
+    track.player.reverse = reversed;
+  }
+
+  // Create a "freeze" buffer from a track — loop a tiny slice of the chop
+  async setTrackFreeze(trackIndex: number, enabled: boolean, position: number = 0.5, windowMs: number = 80) {
+    const T = await getTone();
+    const track = this.tracks[trackIndex];
+    if (!track) return;
+
+    if (enabled) {
+      // Switch to GrainPlayer with tiny grains for freeze effect
+      if (!track.isGranular) {
+        await this.setTrackGranular(trackIndex, true, windowMs / 1000, 0.5);
+      }
+      // Set playback rate to near-zero to "freeze" at a position
+      track.player.grainSize = windowMs / 1000;
+      track.player.overlap = 0.8;
+      track.player.loop = true;
+      track.player.loopStart = position * (track.buffer.duration || 0.1);
+      track.player.loopEnd = track.player.loopStart + windowMs / 1000;
+    } else {
+      track.player.loop = false;
+      // Restore normal grain settings or switch back to Player
+      await this.setTrackGranular(trackIndex, false);
+    }
+  }
+
+  // Filter (LP/HP/BP)
+  async setTrackFilter(trackIndex: number, type: "lowpass" | "highpass" | "bandpass" | "off", frequency: number, Q: number) {
+    const T = await getTone();
+    const track = this.tracks[trackIndex];
+    if (!track) return;
+
+    if (type === "off") {
+      if ((track as any)._filter) {
+        track.player.disconnect();
+        (track as any)._filter.dispose();
+        (track as any)._filter = null;
+        track.player.connect(track.delay);
+      }
+      return;
+    }
+
+    if (!(track as any)._filter) {
+      const filter = new T.Filter(frequency, type);
+      filter.Q.value = Q;
+      track.player.disconnect();
+      track.player.connect(filter);
+      filter.connect(track.delay);
+      (track as any)._filter = filter;
+    } else {
+      (track as any)._filter.type = type;
+      (track as any)._filter.frequency.value = frequency;
+      (track as any)._filter.Q.value = Q;
+    }
+  }
+
+  // Stutter (tremolo-based amplitude modulation)
+  async setTrackStutter(trackIndex: number, enabled: boolean, rate: number = 16, depth: number = 1) {
+    const T = await getTone();
+    const track = this.tracks[trackIndex];
+    if (!track) return;
+
+    if (enabled) {
+      if (!(track as any)._tremolo) {
+        const tremolo = new T.Tremolo(rate, depth).start();
+        track.reverb.disconnect();
+        track.reverb.connect(tremolo);
+        tremolo.connect(track.gain);
+        (track as any)._tremolo = tremolo;
+      } else {
+        (track as any)._tremolo.frequency.value = rate;
+        (track as any)._tremolo.depth.value = depth;
+      }
+    } else {
+      if ((track as any)._tremolo) {
+        track.reverb.disconnect();
+        (track as any)._tremolo.dispose();
+        (track as any)._tremolo = null;
+        track.reverb.connect(track.gain);
+      }
+    }
+  }
+
+  // Time stretch (granular playback rate)
+  setTrackTimeStretch(trackIndex: number, rate: number) {
+    const track = this.tracks[trackIndex];
+    if (!track) return;
+    if (track.isGranular) {
+      track.player.playbackRate = rate;
+    }
+  }
+
+  // Get reversed chop buffers (for reverse stacking)
+  async createReversedChopBuffer(chopIndex: number): Promise<any> {
+    const T = await getTone();
+    if (chopIndex < 0 || chopIndex >= this.chopBuffers.length) return null;
+    const original = this.chopBuffers[chopIndex];
+    const srcData = original.toArray() as Float32Array;
+    const reversed = new Float32Array(srcData.length);
+    for (let i = 0; i < srcData.length; i++) {
+      reversed[i] = srcData[srcData.length - 1 - i];
+    }
+    const buf = new T.ToneAudioBuffer();
+    buf.fromArray(reversed);
+    return buf;
+  }
+
   dispose() {
     this.stop();
     this.stopSource();
+    this.stopMagic();
     if (this._sourcePlayer) {
       try { this._sourcePlayer.dispose(); } catch {}
       this._sourcePlayer = null;
@@ -572,7 +890,7 @@ export class AudioEngine {
   }
 }
 
-function audioBufferToWav(buffer: AudioBuffer): Blob {
+export function audioBufferToWav(buffer: AudioBuffer): Blob {
   const numChannels = buffer.numberOfChannels;
   const sampleRate = buffer.sampleRate;
   const format = 1; // PCM

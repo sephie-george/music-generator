@@ -30,6 +30,7 @@ export default function LobbyPage() {
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
+  const [newMode, setNewMode] = useState<"basic" | "advanced">("basic");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
@@ -45,8 +46,9 @@ export default function LobbyPage() {
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
-    const project = await createProject(newName.trim());
+    const project = await createProject(newName.trim(), newMode);
     setNewName("");
+    setNewMode("basic");
     setShowCreate(false);
     router.push(`/editor/${project.id}`);
   };
@@ -107,9 +109,33 @@ export default function LobbyPage() {
           {/* Create dialog */}
           {showCreate && (
             <div className="mb-6 p-4 border border-border rounded-lg bg-card">
-              <p className="text-sm text-muted-foreground mb-3">
-                Project name
-              </p>
+              <div className="flex items-center gap-4 mb-3">
+                <p className="text-sm text-muted-foreground">
+                  Project name
+                </p>
+                <div className="flex items-center gap-0.5 border border-border rounded-md">
+                  {(["basic", "advanced"] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setNewMode(m)}
+                      className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                        newMode === m
+                          ? "bg-primary/15 text-primary"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      style={{ fontFamily: "var(--font-mono)" }}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+                {newMode === "advanced" && (
+                  <span className="text-[10px] text-muted-foreground/60">
+                    granular, reverse, freeze, detune
+                  </span>
+                )}
+              </div>
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -221,12 +247,19 @@ export default function LobbyPage() {
                           </button>
                         </div>
                       ) : (
-                        <h3
-                          className="font-medium text-sm truncate"
-                          style={{ fontFamily: "var(--font-mono)" }}
-                        >
-                          {project.name}
-                        </h3>
+                        <div className="flex items-center gap-2">
+                          <h3
+                            className="font-medium text-sm truncate"
+                            style={{ fontFamily: "var(--font-mono)" }}
+                          >
+                            {project.name}
+                          </h3>
+                          {project.mode === "advanced" && (
+                            <span className="px-1.5 py-0.5 rounded text-[9px] bg-primary/10 text-primary border border-primary/20" style={{ fontFamily: "var(--font-mono)" }}>
+                              adv
+                            </span>
+                          )}
+                        </div>
                       )}
 
                       {editingId !== project.id && (

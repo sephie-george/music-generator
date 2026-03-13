@@ -1,5 +1,5 @@
 import { put, del, list } from "@vercel/blob";
-import type { ProjectData, ProjectMeta, TrackState, LaneState } from "../types";
+import type { ProjectData, ProjectMeta, ProjectMode, TrackState, LaneState } from "../types";
 
 function defaultTracks(): TrackState[] {
   return Array.from({ length: 16 }, () => ({
@@ -35,6 +35,7 @@ export async function dbGetProjectList(): Promise<ProjectMeta[]> {
       projects.push({
         id: data.id,
         name: data.name,
+        mode: data.mode || "basic",
         createdAt: data.createdAt,
         updatedAt: data.updatedAt,
         chopCount: data.lanes
@@ -61,11 +62,12 @@ export async function dbGetProject(id: string): Promise<ProjectData | null> {
   }
 }
 
-export async function dbCreateProject(id: string, name: string): Promise<ProjectData> {
+export async function dbCreateProject(id: string, name: string, mode: ProjectMode = "basic"): Promise<ProjectData> {
   const now = new Date().toISOString();
   const project: ProjectData = {
     id,
     name,
+    mode,
     createdAt: now,
     updatedAt: now,
     bpm: 120,

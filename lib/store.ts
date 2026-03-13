@@ -12,11 +12,11 @@ export async function getProject(id: string): Promise<ProjectData | null> {
   return res.json();
 }
 
-export async function createProject(name: string): Promise<ProjectData> {
+export async function createProject(name: string, mode: "basic" | "advanced" = "basic"): Promise<ProjectData> {
   const res = await fetch("/api/projects", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, mode }),
   });
   return res.json();
 }

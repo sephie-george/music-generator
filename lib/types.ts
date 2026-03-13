@@ -26,9 +26,12 @@ export interface LaneState {
   chopBoundaries: { start: number; end: number }[];
 }
 
+export type ProjectMode = "basic" | "advanced";
+
 export interface ProjectData {
   id: string;
   name: string;
+  mode: ProjectMode;
   createdAt: string;
   updatedAt: string;
   bpm: number;
@@ -44,6 +47,7 @@ export interface ProjectData {
 export interface ProjectMeta {
   id: string;
   name: string;
+  mode: ProjectMode;
   createdAt: string;
   updatedAt: string;
   chopCount: number;
