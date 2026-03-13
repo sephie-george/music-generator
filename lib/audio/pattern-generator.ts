@@ -7,6 +7,26 @@ interface PatternResult {
   bpm: number; // randomized BPM
 }
 
+// Seeded PRNG (mulberry32) — deterministic random from a 32-bit seed
+function createSeededRandom(seed: number): () => number {
+  let s = seed | 0;
+  return () => {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Hash a string to a 32-bit seed
+function hashString(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+  }
+  return hash;
+}
+
 // Utility: weighted random choice
 function weightedPick(weights: number[]): number {
   const total = weights.reduce((a, b) => a + b, 0);
@@ -32,20 +52,19 @@ function euclidean(hits: number, steps: number): boolean[] {
 }
 
 // Humanize: randomly skip some hits for more natural feel
-function humanize(row: number[], skipProb: number): number[] {
-  return row.map((v) => (v >= 0 && Math.random() < skipProb ? -1 : v));
+function humanize(row: number[], skipProb: number, rand: () => number = Math.random): number[] {
+  return row.map((v) => (v >= 0 && rand() < skipProb ? -1 : v));
 }
 
 // Remove parallel notes: keep only one note per step (random track wins)
-function deduplicateSteps(pattern: number[][], steps: number): void {
+function deduplicateSteps(pattern: number[][], steps: number, rand: () => number = Math.random): void {
   for (let s = 0; s < steps; s++) {
     const activeTracks: number[] = [];
     for (let t = 0; t < pattern.length; t++) {
       if (pattern[t][s] >= 0) activeTracks.push(t);
     }
     if (activeTracks.length > 1) {
-      // Keep one random track, clear the rest
-      const keeper = activeTracks[Math.floor(Math.random() * activeTracks.length)];
+      const keeper = activeTracks[Math.floor(rand() * activeTracks.length)];
       for (const t of activeTracks) {
         if (t !== keeper) pattern[t][s] = -1;
       }
@@ -353,12 +372,14 @@ export function generatePattern(
 }
 
 // Text-prompt-based generation — uses ALL 16 tracks
+// DETERMINISTIC: same prompt + same chops = same pattern
 export function generateFromPrompt(
   chops: Chop[],
   prompt: string,
   steps: number = 32
 ): PatternResult {
-  const p = prompt.toLowerCase();
+  const p = prompt.toLowerCase().trim();
+  const rand = createSeededRandom(hashString(p));
 
   // Parse keywords
   const sparse = /sparse|minimal|less|empty|simple|chill|ambient/.test(p);
@@ -387,10 +408,10 @@ export function generateFromPrompt(
   const lows = pick(lowChops, chops);
   const mids = pick(midChops, chops);
   const highs = pick(highChops, chops);
-  const randFrom = (arr: Chop[]) => arr[Math.floor(Math.random() * arr.length)];
+  const randFrom = (arr: Chop[]) => arr[Math.floor(rand() * arr.length)];
   const uniqueRandFrom = (arr: Chop[], exclude: Set<number>): Chop => {
     const available = arr.filter((c) => !exclude.has(c.index));
-    return available.length > 0 ? available[Math.floor(Math.random() * available.length)] : randFrom(arr);
+    return available.length > 0 ? available[Math.floor(rand() * available.length)] : randFrom(arr);
   };
 
   const pattern: number[][] = Array.from({ length: 16 }, () => Array(steps).fill(-1));
@@ -442,22 +463,21 @@ export function generateFromPrompt(
     } else if (slow) {
       fillRow(0, kick1.index, [0, 24]);
     } else if (industrial) {
-      // Four on the floor
       for (let i = 0; i < steps; i += 4) pattern[0][i] = kick1.index;
     } else {
       const kickPatterns = [
         [0, 10, 16, 26], [0, 6, 16, 22], [0, 10, 14, 16, 26, 30],
         [0, 3, 10, 16, 19, 26], [0, 8, 14, 16, 24, 30],
       ];
-      fillRow(0, kick1.index, kickPatterns[Math.floor(Math.random() * kickPatterns.length)]);
+      fillRow(0, kick1.index, kickPatterns[Math.floor(rand() * kickPatterns.length)]);
     }
-    if (sparse) pattern[0] = humanize(pattern[0], 0.3);
+    if (sparse) pattern[0] = humanize(pattern[0], 0.3, rand);
   }
 
   // Kick 2: sub layer / ghost kicks
   if (!noKick && !hatOnly && !sparse) {
     for (let i = 0; i < steps; i++) {
-      if (pattern[0][i] < 0 && Math.random() < 0.08 * density) {
+      if (pattern[0][i] < 0 && rand() < 0.08 * density) {
         pattern[1][i] = kick2.index;
       }
     }
@@ -470,12 +490,11 @@ export function generateFromPrompt(
     } else if (snareRush || fill) {
       fillRow(2, snare1.index, [8]);
       for (let i = 16; i < steps; i++) {
-        if (Math.random() < 0.55 * density) pattern[2][i] = snare1.index;
+        if (rand() < 0.55 * density) pattern[2][i] = snare1.index;
       }
     } else if (slow) {
       fillRow(2, snare1.index, [16]);
     } else if (latin) {
-      // Clave-ish
       fillRow(2, snare1.index, [6, 10, 16, 24, 28]);
     } else {
       fillRow(2, snare1.index, [8, 24]);
@@ -486,7 +505,7 @@ export function generateFromPrompt(
   if (!hatOnly && !sparse) {
     const ghostPositions: number[] = [];
     for (let i = 0; i < steps; i++) {
-      if (pattern[2][i] < 0 && pattern[0][i] < 0 && Math.random() < 0.12 * density) {
+      if (pattern[2][i] < 0 && pattern[0][i] < 0 && rand() < 0.12 * density) {
         ghostPositions.push(i);
       }
     }
@@ -504,50 +523,48 @@ export function generateFromPrompt(
   // Hat 1: closed / main rhythm
   if (trap) {
     for (let i = 0; i < steps; i++) {
-      if (Math.random() < 0.45 * density) pattern[4][i] = hat1.index;
+      if (rand() < 0.45 * density) pattern[4][i] = hat1.index;
     }
-    // Rolls at random spots
     for (let r = 0; r < 3; r++) {
-      const start = Math.floor(Math.random() * (steps - 4));
-      for (let i = start; i < start + 3 + Math.floor(Math.random() * 3); i++) {
+      const start = Math.floor(rand() * (steps - 4));
+      for (let i = start; i < start + 3 + Math.floor(rand() * 3); i++) {
         if (i < steps) pattern[4][i] = hat1.index;
       }
     }
   } else if (fast || dense || industrial) {
     for (let i = 0; i < steps; i++) {
-      if (Math.random() < 0.7 * density) pattern[4][i] = hat1.index;
+      if (rand() < 0.7 * density) pattern[4][i] = hat1.index;
     }
   } else if (sparse || slow) {
     for (let i = 0; i < steps; i += 4) pattern[4][i] = hat1.index;
   } else if (dub) {
-    // Off-beat hats
     for (let i = 2; i < steps; i += 4) pattern[4][i] = hat1.index;
   } else {
     for (let i = 0; i < steps; i += 2) pattern[4][i] = hat1.index;
     for (let i = 1; i < steps; i += 2) {
-      if (Math.random() < 0.2 * density) pattern[4][i] = hat1.index;
+      if (rand() < 0.2 * density) pattern[4][i] = hat1.index;
     }
   }
 
   if (swing) {
     for (let i = 0; i < steps; i++) {
-      if (i % 4 === 2 && Math.random() < 0.5) pattern[4][i] = -1;
-      if (i % 4 === 3 && Math.random() < 0.45) pattern[4][i] = hat1.index;
+      if (i % 4 === 2 && rand() < 0.5) pattern[4][i] = -1;
+      if (i % 4 === 3 && rand() < 0.45) pattern[4][i] = hat1.index;
     }
   }
 
   // Hat 2: open hat / accent
   if (!sparse) {
-    const openPositions = [7, 15, 23, 31].filter(() => Math.random() < 0.6 * density);
+    const openPositions = [7, 15, 23, 31].filter(() => rand() < 0.6 * density);
     fillRow(5, hat2.index, openPositions);
   }
 
   // Hat 3: shaker / ride pattern (different rhythm)
   if (dense || polyrhythm || latin) {
-    fillEuc(6, hat3.index, 5 + Math.floor(Math.random() * 6), Math.floor(Math.random() * 4));
+    fillEuc(6, hat3.index, 5 + Math.floor(rand() * 6), Math.floor(rand() * 4));
   } else if (!sparse) {
     for (let i = 0; i < steps; i++) {
-      if (Math.random() < 0.1 * density) pattern[6][i] = hat3.index;
+      if (rand() < 0.1 * density) pattern[6][i] = hat3.index;
     }
   }
 
@@ -560,33 +577,28 @@ export function generateFromPrompt(
   }
 
   if (polyrhythm) {
-    // Different euclidean densities per perc track
     const eucDensities = [3, 5, 7, 9, 11];
     perc.forEach((c, i) => {
-      fillEuc(7 + i, c.index, eucDensities[i], Math.floor(Math.random() * steps));
-      pattern[7 + i] = humanize(pattern[7 + i], 0.15);
+      fillEuc(7 + i, c.index, eucDensities[i], Math.floor(rand() * steps));
+      pattern[7 + i] = humanize(pattern[7 + i], 0.15, rand);
     });
   } else if (glitch) {
-    // Stuttery random patterns
     perc.forEach((c, i) => {
       for (let s = 0; s < steps; s++) {
-        if (Math.random() < 0.18 * density) pattern[7 + i][s] = c.index;
+        if (rand() < 0.18 * density) pattern[7 + i][s] = c.index;
       }
-      // Add micro-bursts
-      const burstStart = Math.floor(Math.random() * (steps - 3));
-      for (let s = burstStart; s < burstStart + 2 + Math.floor(Math.random() * 3); s++) {
+      const burstStart = Math.floor(rand() * (steps - 3));
+      for (let s = burstStart; s < burstStart + 2 + Math.floor(rand() * 3); s++) {
         if (s < steps) pattern[7 + i][s] = c.index;
       }
     });
   } else if (latin) {
-    // Conga-like layers
     fillEuc(7, perc[0].index, 7, 1);
     fillEuc(8, perc[1].index, 5, 3);
-    fillRow(9, perc[2].index, [0, 6, 10, 16, 22, 28]); // tumbao
+    fillRow(9, perc[2].index, [0, 6, 10, 16, 22, 28]);
     fillEuc(10, perc[3].index, 3, 2);
-    for (let i = 0; i < steps; i += 8) pattern[11][i] = perc[4].index; // bell
+    for (let i = 0; i < steps; i += 8) pattern[11][i] = perc[4].index;
   } else if (industrial) {
-    // Harsh, mechanical patterns
     perc.forEach((c, i) => {
       const interval = 3 + i;
       for (let s = i; s < steps; s += interval) {
@@ -594,12 +606,11 @@ export function generateFromPrompt(
       }
     });
   } else {
-    // General perc: each track gets a different euclidean density
     perc.forEach((c, i) => {
-      const hits = Math.max(1, Math.floor((2 + Math.random() * 5) * density));
-      const offset = Math.floor(Math.random() * steps);
+      const hits = Math.max(1, Math.floor((2 + rand() * 5) * density));
+      const offset = Math.floor(rand() * steps);
       fillEuc(7 + i, c.index, hits, offset);
-      pattern[7 + i] = humanize(pattern[7 + i], 0.1 + Math.random() * 0.2);
+      pattern[7 + i] = humanize(pattern[7 + i], 0.1 + rand() * 0.2, rand);
     });
   }
 
@@ -609,31 +620,29 @@ export function generateFromPrompt(
     assign(t, c);
 
     if (glitch) {
-      // Random stutter
       for (let s = 0; s < steps; s++) {
-        if (Math.random() < 0.12 * density) pattern[t][s] = c.index;
+        if (rand() < 0.12 * density) pattern[t][s] = c.index;
       }
     } else if (fill && t >= 14) {
-      // Build/fill in last 8 steps
       for (let s = steps - 8; s < steps; s++) {
-        if (Math.random() < 0.5 * density) pattern[t][s] = c.index;
+        if (rand() < 0.5 * density) pattern[t][s] = c.index;
       }
     } else if (dense) {
-      fillEuc(t, c.index, 2 + Math.floor(Math.random() * 4), Math.floor(Math.random() * steps));
+      fillEuc(t, c.index, 2 + Math.floor(rand() * 4), Math.floor(rand() * steps));
     } else if (!sparse) {
-      // Very sparse texture
       for (let s = 0; s < steps; s++) {
-        if (Math.random() < 0.06 * density) pattern[t][s] = c.index;
+        if (rand() < 0.06 * density) pattern[t][s] = c.index;
       }
     }
-    // Sparse: leave these tracks empty (intentional breathing room)
   }
 
   // Final humanize pass on all tracks
   for (let t = 0; t < 16; t++) {
-    pattern[t] = humanize(pattern[t], 0.03 + (t > 6 ? 0.05 : 0));
+    pattern[t] = humanize(pattern[t], 0.03 + (t > 6 ? 0.05 : 0), rand);
   }
 
-  deduplicateSteps(pattern, steps);
-  return { pattern, trackAssignments, bpm: randomBpm() };
+  // BPM is also deterministic from the prompt
+  const seededBpm = 60 + Math.floor(rand() * 61);
+  deduplicateSteps(pattern, steps, rand);
+  return { pattern, trackAssignments, bpm: seededBpm };
 }
