@@ -11,6 +11,8 @@ import {
   MoreVertical,
   X,
   Check,
+  Sun,
+  Moon,
 } from "lucide-react";
 import type { ProjectMeta } from "@/lib/types";
 import {
@@ -20,9 +22,11 @@ import {
   renameProject,
 } from "@/lib/store";
 import { formatDate } from "@/lib/utils";
+import { useTheme } from "./theme-provider";
 
 export default function LobbyPage() {
   const router = useRouter();
+  const { theme, toggleTheme } = useTheme();
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -79,13 +83,22 @@ export default function LobbyPage() {
               CHOP
             </h1>
           </div>
-          <button
-            onClick={() => setShowCreate(true)}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            New Project
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={toggleTheme}
+              className="p-2 rounded-md border border-border hover:bg-secondary transition-colors"
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            >
+              {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </button>
+            <button
+              onClick={() => setShowCreate(true)}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              New Project
+            </button>
+          </div>
         </div>
       </header>
 

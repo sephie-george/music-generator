@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { ThemeProvider } from "./theme-provider";
 
 export const metadata: Metadata = {
   title: "CHOP — Sample-Based Music Generator",
@@ -12,7 +13,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" className="dark" suppressHydrationWarning>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `try{const t=localStorage.getItem("chop-theme");if(t)document.documentElement.className=t}catch(e){}`,
+          }}
+        />
+      </head>
       <body
         className="min-h-screen antialiased"
         style={{
@@ -21,7 +29,7 @@ export default function RootLayout({
           ["--font-mono" as string]: "'IBM Plex Mono', monospace",
         }}
       >
-        {children}
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

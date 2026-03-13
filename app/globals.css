@@ -24,6 +24,32 @@
     --input: 0 0% 15%;
     --ring: 24 95% 53%;
     --radius: 0.5rem;
+    --waveform-bg: 0 0% 8%;
+    --waveform-fg: 24 95% 53%;
+    --waveform-mark: 24 95% 53%;
+  }
+
+  .light {
+    --background: 0 0% 98%;
+    --foreground: 0 0% 9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 9%;
+    --primary: 24 95% 48%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 93%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 93%;
+    --muted-foreground: 0 0% 40%;
+    --accent: 24 95% 48%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 63% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 85%;
+    --input: 0 0% 85%;
+    --ring: 24 95% 48%;
+    --waveform-bg: 0 0% 94%;
+    --waveform-fg: 24 95% 40%;
+    --waveform-mark: 24 95% 48%;
   }
 
   * {
