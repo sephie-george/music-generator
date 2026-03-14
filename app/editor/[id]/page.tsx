@@ -166,6 +166,12 @@ export default function EditorPage() {
   // Pattern snapshot at generation time per mode+lane — to know if pattern changed
   const magicPatternSnapRef = useRef<Record<MagicMode, [string, string]>>({ mystical: ["", ""], somna: ["", ""], vertigo: ["", ""] });
 
+  // Screen keyboard
+  const [showKeyboard, setShowKeyboard] = useState(false);
+  const [keyboardMode, setKeyboardMode] = useState<"samples" | "soundscape">("samples");
+  const [keyboardLane, setKeyboardLane] = useState(0);
+  const activeKeysRef = useRef<Set<string>>(new Set());
+
   // Mouse drag painting state
   const [isPainting, setIsPainting] = useState(false);
   const paintModeRef = useRef<"add" | "remove">("add");
@@ -1918,6 +1924,14 @@ export default function EditorPage() {
             /64
           </span>
           <button
+            onClick={() => setShowKeyboard(true)}
+            disabled={!hasAnyChops}
+            className="px-3 py-1 rounded-md text-[10px] font-bold border border-border/50 hover:bg-secondary transition-all disabled:opacity-30"
+            style={{ fontFamily: "var(--font-mono)" }}
+          >
+            Keyboard
+          </button>
+          <button
             onClick={() => setShowMagicPanel(!showMagicPanel)}
             disabled={!hasAnyChops}
             className={`px-3 py-1 rounded-md text-[10px] font-bold border transition-all disabled:opacity-30 ${
@@ -2516,6 +2530,168 @@ export default function EditorPage() {
           </div>
         )}
       </div>
+
+      {/* Screen Keyboard Modal */}
+      {showKeyboard && (() => {
+        const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        const isBlack = (n: number) => [1, 3, 6, 8, 10].includes(n % 12);
+        // 2 octaves: C3-B4 = 24 keys
+        const startNote = 48; // C3 MIDI
+        const keyCount = 25; // C3 to C5
+        const whiteKeys: number[] = [];
+        const blackKeys: { note: number; leftPct: number }[] = [];
+        for (let i = 0; i < keyCount; i++) {
+          if (!isBlack(i)) whiteKeys.push(startNote + i);
+        }
+        // Position black keys relative to white keys
+        for (let i = 0; i < keyCount; i++) {
+          if (isBlack(i)) {
+            // Find how many white keys are before this note
+            let wIdx = 0;
+            for (let j = 0; j < i; j++) { if (!isBlack(j)) wIdx++; }
+            blackKeys.push({ note: startNote + i, leftPct: ((wIdx + 0.65) / whiteKeys.length) * 100 });
+          }
+        }
+        const whiteW = 100 / whiteKeys.length;
+        const engine = engineRefs[keyboardLane].current;
+        const chops = laneChops[keyboardLane];
+        const hasMagic = magicPlayingMode[keyboardLane] !== null;
+
+        const handleNoteOn = (midiNote: number) => {
+          if (!engine) return;
+          const semitones = midiNote - 60; // C4 = 0
+          if (keyboardMode === "samples") {
+            // Map note to chop index, wrapping
+            if (chops.length === 0) return;
+            const chopIdx = ((midiNote - startNote) % chops.length + chops.length) % chops.length;
+            engine.playChopOneShot(chopIdx, semitones);
+          } else {
+            // Soundscape: shift pitch
+            engine.setMagicPitch(semitones);
+          }
+        };
+        const handleNoteOff = (_midiNote: number) => {
+          if (keyboardMode === "soundscape" && engine) {
+            engine.setMagicPitch(0);
+          }
+        };
+
+        // Keyboard shortcut mapping (2 rows: zxcvbn.. and qwerty..)
+        const keyMap: Record<string, number> = {};
+        const bottomRow = "zsxdcvgbhnjm,l.;/";
+        const topRow = "q2w3er5t6y7ui9o0p";
+        for (let i = 0; i < bottomRow.length && i < keyCount; i++) keyMap[bottomRow[i]] = startNote + i;
+        for (let i = 0; i < topRow.length && startNote + 12 + i < startNote + keyCount; i++) keyMap[topRow[i]] = startNote + 12 + i;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-end justify-center pb-8" onClick={() => setShowKeyboard(false)}>
+            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" />
+            <div className="relative w-[720px] bg-card border border-border rounded-xl shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+              {/* Header */}
+              <div className="flex items-center justify-between px-4 py-2 border-b border-border/50">
+                <div className="flex items-center gap-3">
+                  <span className="text-[11px] font-bold" style={{ fontFamily: "var(--font-mono)" }}>KEYBOARD</span>
+                  <div className="flex items-center gap-0.5 bg-secondary rounded-md p-0.5">
+                    {(["samples", "soundscape"] as const).map((m) => (
+                      <button key={m} onClick={() => setKeyboardMode(m)}
+                        className={`px-2 py-0.5 rounded text-[9px] font-medium transition-colors ${
+                          keyboardMode === m ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                        }`} style={{ fontFamily: "var(--font-mono)" }}>{m}</button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[9px] text-muted-foreground">lane</span>
+                    {[0, 1].map((l) => (
+                      <button key={l} onClick={() => setKeyboardLane(l)}
+                        className={`text-[9px] px-1.5 py-0.5 rounded ${keyboardLane === l ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"}`}
+                        style={{ fontFamily: "var(--font-mono)" }}>{l + 1}</button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {keyboardMode === "soundscape" && !hasMagic && (
+                    <span className="text-[9px] text-yellow-500" style={{ fontFamily: "var(--font-mono)" }}>play a soundscape first</span>
+                  )}
+                  <button onClick={() => setShowKeyboard(false)} className="text-muted-foreground hover:text-foreground p-1">✕</button>
+                </div>
+              </div>
+
+              {/* Piano keyboard */}
+              <div
+                className="relative h-36 mx-2 mb-2 mt-1 select-none"
+                onKeyDown={(e) => {
+                  if (e.repeat) return;
+                  const note = keyMap[e.key.toLowerCase()];
+                  if (note !== undefined && !activeKeysRef.current.has(e.key.toLowerCase())) {
+                    activeKeysRef.current.add(e.key.toLowerCase());
+                    handleNoteOn(note);
+                    // Force re-render for visual feedback
+                    setShowKeyboard(true);
+                  }
+                }}
+                onKeyUp={(e) => {
+                  const note = keyMap[e.key.toLowerCase()];
+                  if (note !== undefined) {
+                    activeKeysRef.current.delete(e.key.toLowerCase());
+                    handleNoteOff(note);
+                    setShowKeyboard(true);
+                  }
+                }}
+                tabIndex={0}
+                ref={(el) => el?.focus()}
+              >
+                {/* White keys */}
+                {whiteKeys.map((note, i) => {
+                  const noteName = NOTE_NAMES[note % 12];
+                  const octave = Math.floor(note / 12) - 1;
+                  const isActive = Array.from(activeKeysRef.current).some(k => keyMap[k] === note);
+                  return (
+                    <div
+                      key={note}
+                      onMouseDown={() => { handleNoteOn(note); activeKeysRef.current.add(`_m${note}`); setShowKeyboard(true); }}
+                      onMouseUp={() => { handleNoteOff(note); activeKeysRef.current.delete(`_m${note}`); setShowKeyboard(true); }}
+                      onMouseLeave={() => { if (activeKeysRef.current.has(`_m${note}`)) { handleNoteOff(note); activeKeysRef.current.delete(`_m${note}`); setShowKeyboard(true); } }}
+                      className={`absolute top-0 bottom-0 rounded-b-md border border-border/60 cursor-pointer transition-colors ${
+                        isActive ? "bg-primary/20 border-primary/40" : "bg-card hover:bg-secondary/80"
+                      }`}
+                      style={{ left: `${(i / whiteKeys.length) * 100}%`, width: `${whiteW}%` }}
+                    >
+                      <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 text-[8px] text-muted-foreground/50 select-none" style={{ fontFamily: "var(--font-mono)" }}>
+                        {noteName}{octave}
+                      </span>
+                    </div>
+                  );
+                })}
+                {/* Black keys */}
+                {blackKeys.map(({ note, leftPct }) => {
+                  const isActive = Array.from(activeKeysRef.current).some(k => keyMap[k] === note);
+                  return (
+                    <div
+                      key={note}
+                      onMouseDown={(e) => { e.stopPropagation(); handleNoteOn(note); activeKeysRef.current.add(`_m${note}`); setShowKeyboard(true); }}
+                      onMouseUp={(e) => { e.stopPropagation(); handleNoteOff(note); activeKeysRef.current.delete(`_m${note}`); setShowKeyboard(true); }}
+                      onMouseLeave={() => { if (activeKeysRef.current.has(`_m${note}`)) { handleNoteOff(note); activeKeysRef.current.delete(`_m${note}`); setShowKeyboard(true); } }}
+                      className={`absolute top-0 h-[60%] rounded-b-md z-10 cursor-pointer transition-colors ${
+                        isActive ? "bg-primary/80" : "bg-zinc-900 dark:bg-zinc-800 hover:bg-zinc-700"
+                      }`}
+                      style={{ left: `${leftPct}%`, width: `${whiteW * 0.6}%` }}
+                    />
+                  );
+                })}
+              </div>
+
+              {/* Info bar */}
+              <div className="px-4 py-1.5 border-t border-border/30 flex items-center justify-between">
+                <span className="text-[8px] text-muted-foreground/50" style={{ fontFamily: "var(--font-mono)" }}>
+                  {keyboardMode === "samples"
+                    ? `${chops.length} chops loaded · keys: Z-/ (low) Q-P (high)`
+                    : "keys control pitch · C4 = original pitch"}
+                </span>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

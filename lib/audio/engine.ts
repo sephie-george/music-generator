@@ -685,6 +685,30 @@ export class AudioEngine {
     this._magicGain.gain.value = volume;
   }
 
+  // Real-time magic pitch: semitones offset via playback rate
+  setMagicPitch(semitones: number) {
+    if (!this._magicPlayer) return;
+    this._magicPlayer.playbackRate = Math.pow(2, semitones / 12);
+  }
+
+  // Play a single chop as a one-shot with pitch (for keyboard)
+  async playChopOneShot(chopIndex: number, semitones: number = 0): Promise<void> {
+    if (chopIndex < 0 || chopIndex >= this.chopBuffers.length) return;
+    const T = await getTone();
+    const player = new T.Player(this.chopBuffers[chopIndex]);
+    player.playbackRate = Math.pow(2, semitones / 12);
+    player.fadeIn = 0.003;
+    player.fadeOut = 0.01;
+    player.connect(this.masterDelay || T.getDestination());
+    player.start();
+    // Auto-dispose after playback
+    player.onstop = () => { try { player.dispose(); } catch {} };
+  }
+
+  getChopCount(): number {
+    return this.chopBuffers.length;
+  }
+
   async applyMagicPreset(preset: {
     volume: number; eqLow: number; eqMid: number; eqHigh: number;
     filterFreq: number; delayWet: number; delayTime: number; delayFb: number;
