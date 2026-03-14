@@ -459,10 +459,11 @@ export class AudioEngine {
     return audioBufferToWav(renderedBuffer);
   }
 
-  // Export magic soundscape to WAV
-  async exportMagicWAV(): Promise<Blob> {
-    if (!this._magicBuffer) throw new Error("No magic buffer — generate first");
-    return audioBufferToWav(this._magicBuffer);
+  // Export magic soundscape to WAV (exports first available buffer)
+  async exportMagicWAV(mode?: string): Promise<Blob> {
+    const buf = mode ? this._magicBuffers.get(mode) : this._magicBuffers.values().next().value;
+    if (!buf) throw new Error("No magic buffer — generate first");
+    return audioBufferToWav(buf);
   }
 
   // Merge two AudioBuffers into one (static utility)
@@ -531,45 +532,40 @@ export class AudioEngine {
     if (this.masterGain) this.masterGain.gain.value = volume;
   }
 
-  // Magic soundscape
+  // Magic soundscape — per-mode buffers
   private _magicPlayer: any = null;
-  private _magicBuffer: AudioBuffer | null = null;
+  private _magicBuffers = new Map<string, AudioBuffer>();
+  private _magicActiveMode: string | null = null;
+  private _magicEQ: { low: any; mid: any; high: any } | null = null;
+  private _magicFilter: any = null;
+  private _magicDelay: any = null;
+  private _magicReverb: any = null;
+  private _magicGain: any = null;
 
-  async generateMagic(params: { stretchFactor: number; windowSize: number; layers: boolean; reverbTail: number }): Promise<AudioBuffer> {
-    if (!this.sourceBuffer) throw new Error("No audio loaded");
-
-    // Collect unique chop indices used in the current pattern
+  private _buildDenseBuffer(): { buffer: AudioBuffer; sr: number } | null {
+    if (!this.sourceBuffer) return null;
     const usedChopSet = new Set<number>();
     for (let t = 0; t < 16; t++) {
       for (let s = 0; s < this._steps; s++) {
         const v = this.pattern[t][s];
-        if (v >= 0 && v < this.chopBuffers.length) {
-          usedChopSet.add(v);
-        }
+        if (v >= 0 && v < this.chopBuffers.length) usedChopSet.add(v);
       }
     }
     const usedChops = Array.from(usedChopSet).sort((a, b) => a - b);
-    if (usedChops.length === 0) throw new Error("No chops in pattern");
+    if (usedChops.length === 0) return null;
 
-    // Build a continuous, dense buffer from the used chops with crossfades
     const crossfadeSamples = 512;
     const chopArrays: Float32Array[] = usedChops.map(
       (idx) => this.chopBuffers[idx].toArray() as Float32Array
     );
-
-    // Calculate total length (each chop overlaps with next by crossfadeSamples)
     let totalLength = 0;
     for (const arr of chopArrays) totalLength += arr.length;
-    if (chopArrays.length > 1) {
-      totalLength -= crossfadeSamples * (chopArrays.length - 1);
-    }
-    // Repeat the sequence a few times for longer source material
-    const repeats = Math.max(1, Math.min(4, Math.ceil(2.0 / (totalLength / this.sourceBuffer.sampleRate))));
+    if (chopArrays.length > 1) totalLength -= crossfadeSamples * (chopArrays.length - 1);
+    const sr = this.sourceBuffer.sampleRate;
+    const repeats = Math.max(1, Math.min(4, Math.ceil(2.0 / (totalLength / sr))));
     const singlePassLength = totalLength;
     totalLength *= repeats;
-
     const continuous = new Float32Array(totalLength);
-
     for (let rep = 0; rep < repeats; rep++) {
       let offset = rep * singlePassLength;
       for (let i = 0; i < chopArrays.length; i++) {
@@ -577,66 +573,130 @@ export class AudioEngine {
         for (let s = 0; s < chopData.length; s++) {
           const pos = offset + s;
           if (pos >= 0 && pos < totalLength) {
-            // Crossfade: fade in at the start of each chop (except first), fade out at end
             let gain = 1;
-            if (i > 0 && s < crossfadeSamples) {
-              gain = s / crossfadeSamples; // fade in
-            }
-            if (i < chopArrays.length - 1 && s >= chopData.length - crossfadeSamples) {
-              gain = (chopData.length - s) / crossfadeSamples; // fade out
-            }
+            if (i > 0 && s < crossfadeSamples) gain = s / crossfadeSamples;
+            if (i < chopArrays.length - 1 && s >= chopData.length - crossfadeSamples) gain = (chopData.length - s) / crossfadeSamples;
             continuous[pos] += chopData[s] * gain;
           }
         }
         offset += chopData.length - (i < chopArrays.length - 1 ? crossfadeSamples : 0);
       }
     }
-
-    // Normalize
     let peak = 0;
-    for (let i = 0; i < totalLength; i++) {
-      const v = Math.abs(continuous[i]);
-      if (v > peak) peak = v;
-    }
-    if (peak > 0) {
-      const scale = 0.95 / peak;
-      for (let i = 0; i < totalLength; i++) continuous[i] *= scale;
-    }
-
-    // Create AudioBuffer from continuous data
-    const sr = this.sourceBuffer.sampleRate;
+    for (let i = 0; i < totalLength; i++) { const v = Math.abs(continuous[i]); if (v > peak) peak = v; }
+    if (peak > 0) { const scale = 0.95 / peak; for (let i = 0; i < totalLength; i++) continuous[i] *= scale; }
     const offCtx = new OfflineAudioContext(1, totalLength, sr);
     const denseBuffer = offCtx.createBuffer(1, totalLength, sr);
     denseBuffer.getChannelData(0).set(continuous);
+    return { buffer: denseBuffer, sr };
+  }
 
-    // Now Paulstretch the dense, tonal material
+  async generateMagic(mode: string, params: { stretchFactor: number; windowSize: number; reverbTail: number; grainSize?: number; grainDensity?: number; phaseDrift?: number; character: string }): Promise<AudioBuffer> {
+    const dense = this._buildDenseBuffer();
+    if (!dense) throw new Error("No chops in pattern");
+
     const { MagicSoundscape } = await import("./magic");
-    const magic = new MagicSoundscape(denseBuffer, params);
+    const magic = new MagicSoundscape(dense.buffer, params as any);
     const result = await magic.generate();
-    this._magicBuffer = result;
+    this._magicBuffers.set(mode, result);
     return result;
   }
 
-  async playMagic(): Promise<void> {
+  async playMagic(mode: string): Promise<void> {
     const T = await getTone();
     this.stopMagic();
-    if (!this._magicBuffer) return;
+    const buffer = this._magicBuffers.get(mode);
+    if (!buffer) return;
+    this._magicActiveMode = mode;
 
     const toneBuffer = new T.ToneAudioBuffer();
-    const mono = new Float32Array(this._magicBuffer.length);
-    for (let ch = 0; ch < this._magicBuffer.numberOfChannels; ch++) {
-      const data = this._magicBuffer.getChannelData(ch);
-      for (let i = 0; i < this._magicBuffer.length; i++) {
-        mono[i] += data[i] / this._magicBuffer.numberOfChannels;
-      }
+    const mono = new Float32Array(buffer.length);
+    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+      const data = buffer.getChannelData(ch);
+      for (let i = 0; i < buffer.length; i++) mono[i] += data[i] / buffer.numberOfChannels;
     }
     toneBuffer.fromArray(mono);
 
-    this._magicPlayer = new T.Player(toneBuffer).toDestination();
+    this._magicEQ = {
+      low: new T.Filter(200, "lowshelf"),
+      mid: new T.Filter(1000, "peaking"),
+      high: new T.Filter(4000, "highshelf"),
+    };
+    this._magicEQ.low.gain.value = 0;
+    this._magicEQ.mid.gain.value = 0;
+    (this._magicEQ.mid as any).Q.value = 0.7;
+    this._magicEQ.high.gain.value = 0;
+    this._magicFilter = new T.Filter(20000, "lowpass");
+    this._magicFilter.Q.value = 1;
+    this._magicDelay = new T.FeedbackDelay(0.5, 0.3);
+    this._magicDelay.wet.value = 0;
+    this._magicReverb = new T.Reverb(4);
+    this._magicReverb.wet.value = 0;
+    this._magicGain = new T.Gain(1);
+
+    this._magicPlayer = new T.Player(toneBuffer);
     this._magicPlayer.loop = true;
     this._magicPlayer.fadeIn = 2;
     this._magicPlayer.fadeOut = 2;
+    this._magicPlayer.chain(
+      this._magicEQ.low, this._magicEQ.mid, this._magicEQ.high,
+      this._magicFilter, this._magicDelay, this._magicReverb,
+      this._magicGain, T.getDestination(),
+    );
     this._magicPlayer.start();
+  }
+
+  setMagicEQ(band: "low" | "mid" | "high", gain: number) {
+    if (!this._magicEQ) return;
+    this._magicEQ[band].gain.value = gain;
+  }
+
+  setMagicFilter(frequency: number, q: number = 1) {
+    if (!this._magicFilter) return;
+    this._magicFilter.frequency.value = frequency;
+    this._magicFilter.Q.value = q;
+  }
+
+  setMagicDelay(wet: number, time: number = 0.5, feedback: number = 0.3) {
+    if (!this._magicDelay) return;
+    this._magicDelay.wet.value = wet;
+    this._magicDelay.delayTime.value = time;
+    this._magicDelay.feedback.value = Math.min(0.95, feedback);
+  }
+
+  async setMagicReverb(wet: number, decay: number = 4) {
+    const T = await getTone();
+    if (!this._magicReverb) return;
+    if (Math.abs((this._magicReverb as any).decay - decay) > 0.5) {
+      const oldReverb = this._magicReverb;
+      this._magicReverb = new T.Reverb(decay);
+      this._magicReverb.wet.value = wet;
+      this._magicDelay.disconnect();
+      oldReverb.dispose();
+      this._magicDelay.connect(this._magicReverb);
+      this._magicReverb.connect(this._magicGain);
+    } else {
+      this._magicReverb.wet.value = wet;
+    }
+  }
+
+  setMagicVolume(volume: number) {
+    if (!this._magicGain) return;
+    this._magicGain.gain.value = volume;
+  }
+
+  async applyMagicPreset(preset: {
+    volume: number; eqLow: number; eqMid: number; eqHigh: number;
+    filterFreq: number; delayWet: number; delayTime: number; delayFb: number;
+    reverbWet: number; reverbDecay: number;
+  }) {
+    this.setMagicEQ("low", preset.eqLow);
+    this.setMagicEQ("mid", preset.eqMid);
+    this.setMagicEQ("high", preset.eqHigh);
+    this.setMagicFilter(preset.filterFreq);
+    this.setMagicDelay(preset.delayWet, preset.delayTime, preset.delayFb);
+    await this.setMagicReverb(preset.reverbWet, preset.reverbDecay);
+    this.setMagicVolume(preset.volume);
   }
 
   stopMagic() {
@@ -644,10 +704,20 @@ export class AudioEngine {
       try { this._magicPlayer.stop(); this._magicPlayer.dispose(); } catch {}
       this._magicPlayer = null;
     }
+    this._magicActiveMode = null;
+    if (this._magicEQ) {
+      try { this._magicEQ.low.dispose(); this._magicEQ.mid.dispose(); this._magicEQ.high.dispose(); } catch {}
+      this._magicEQ = null;
+    }
+    if (this._magicFilter) { try { this._magicFilter.dispose(); } catch {} this._magicFilter = null; }
+    if (this._magicDelay) { try { this._magicDelay.dispose(); } catch {} this._magicDelay = null; }
+    if (this._magicReverb) { try { this._magicReverb.dispose(); } catch {} this._magicReverb = null; }
+    if (this._magicGain) { try { this._magicGain.dispose(); } catch {} this._magicGain = null; }
   }
 
-  get hasMagicBuffer(): boolean {
-    return this._magicBuffer !== null;
+  hasMagicBuffer(mode?: string): boolean {
+    if (mode) return this._magicBuffers.has(mode);
+    return this._magicBuffers.size > 0;
   }
 
   getSourceBuffer(): AudioBuffer | null {
@@ -657,6 +727,7 @@ export class AudioEngine {
   // Play original source audio
   private _sourcePlayer: any = null;
   private _sourceStopCallback: (() => void) | null = null;
+  private _sourceToneBuffer: any = null; // cached for scrubbing
 
   onSourceStop(cb: () => void) {
     this._sourceStopCallback = cb;
@@ -666,14 +737,10 @@ export class AudioEngine {
     return this._sourcePlayer?.state === "started";
   }
 
-  async playSource() {
+  private async getSourceToneBuffer() {
+    if (this._sourceToneBuffer) return this._sourceToneBuffer;
     const T = await getTone();
-    if (!this.sourceBuffer) return;
-    await T.start();
-
-    // Stop any existing source playback
-    this.stopSource();
-
+    if (!this.sourceBuffer) return null;
     const toneBuffer = new T.ToneAudioBuffer();
     const mono = new Float32Array(this.sourceBuffer.length);
     for (let ch = 0; ch < this.sourceBuffer.numberOfChannels; ch++) {
@@ -683,6 +750,18 @@ export class AudioEngine {
       }
     }
     toneBuffer.fromArray(mono);
+    this._sourceToneBuffer = toneBuffer;
+    return toneBuffer;
+  }
+
+  async playSource() {
+    const T = await getTone();
+    if (!this.sourceBuffer) return;
+    await T.start();
+    this.stopSource();
+
+    const toneBuffer = await this.getSourceToneBuffer();
+    if (!toneBuffer) return;
 
     this._sourcePlayer = new T.Player(toneBuffer).toDestination();
     this._sourcePlayer.fadeIn = 0.005;
@@ -691,6 +770,27 @@ export class AudioEngine {
       this._sourceStopCallback?.();
     };
     this._sourcePlayer.start();
+  }
+
+  // Play source from a specific position (0-1 normalized), used for scrubbing
+  async playSourceAt(position: number) {
+    const T = await getTone();
+    if (!this.sourceBuffer) return;
+    await T.start();
+    this.stopSource();
+
+    const toneBuffer = await this.getSourceToneBuffer();
+    if (!toneBuffer) return;
+
+    const offset = Math.max(0, Math.min(1, position)) * this.sourceBuffer.duration;
+
+    this._sourcePlayer = new T.Player(toneBuffer).toDestination();
+    this._sourcePlayer.fadeIn = 0.002;
+    this._sourcePlayer.fadeOut = 0.01;
+    this._sourcePlayer.onstop = () => {
+      this._sourceStopCallback?.();
+    };
+    this._sourcePlayer.start(undefined, offset);
   }
 
   stopSource() {

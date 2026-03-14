@@ -9,7 +9,6 @@ import {
   Square,
   Pause,
   Download,
-  Save,
   Shuffle,
   Trash2,
   AudioWaveform,
@@ -31,7 +30,7 @@ import {
   TRACK_COLORS,
 } from "@/lib/types";
 import { getProject, saveProject, saveAudioBlob, getAudioBlob } from "@/lib/store";
-import { detectTransients, chopEqual } from "@/lib/audio/transient-detector";
+import { detectTransients, chopEqual, chopLongNotes } from "@/lib/audio/transient-detector";
 import { generatePattern, generateFromPrompt } from "@/lib/audio/pattern-generator";
 import { AudioEngine, audioBufferToWav as audioBufferToWavLocal } from "@/lib/audio/engine";
 import { useTheme } from "@/app/theme-provider";
@@ -73,11 +72,8 @@ export default function EditorPage() {
   const [lanePlaying, setLanePlaying] = useState<[boolean, boolean]>([false, false]);
   const [currentStep, setCurrentStep] = useState(-1);
   const [bpm, setBpm] = useState(120);
-  const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
-  const [exportMode, setExportMode] = useState<"lanes" | "merged" | "magic">("lanes");
   const [showExportMenu, setShowExportMenu] = useState(false);
-  const [playMode, setPlayMode] = useState<"both" | 0 | 1>("both");
 
   // Resizable divider
   const [laneSplit, setLaneSplit] = useState(50); // percentage for lane 0
@@ -102,7 +98,7 @@ export default function EditorPage() {
   const [laneTrackSolos, setLaneTrackSolos] = useState<[boolean[], boolean[]]>([Array(16).fill(false), Array(16).fill(false)]);
   const [laneTrackPitches, setLaneTrackPitches] = useState<[number[], number[]]>([Array(16).fill(0), Array(16).fill(0)]);
   const [laneTrackHalfSpeed, setLaneTrackHalfSpeed] = useState<[boolean[], boolean[]]>([Array(16).fill(false), Array(16).fill(false)]);
-  const [laneChopModes, setLaneChopModes] = useState<["transient" | "equal" | "fine", "transient" | "equal" | "fine"]>(["transient", "transient"]);
+  const [laneChopModes, setLaneChopModes] = useState<["transient" | "equal" | "fine" | "long", "transient" | "equal" | "fine" | "long"]>(["transient", "transient"]);
   const [laneSensitivities, setLaneSensitivities] = useState<["soft" | "medium" | "hard", "soft" | "medium" | "hard"]>(["medium", "medium"]);
   const [laneSelectedTemplates, setLaneSelectedTemplates] = useState<[PatternTemplate, PatternTemplate]>(["basic", "basic"]);
   const [lanePromptTexts, setLanePromptTexts] = useState<[string, string]>(["", ""]);
@@ -142,14 +138,33 @@ export default function EditorPage() {
     Array.from({ length: 16 }, defaultAdvTrack),
   ]);
   const [selectedAdvTrack, setSelectedAdvTrack] = useState<[number, number]>([0, 0]);
+  const [advFxOpen, setAdvFxOpen] = useState(false);
 
   // Magic soundscape state
-  const [magicGenerating, setMagicGenerating] = useState<[boolean, boolean]>([false, false]);
-  const [magicReady, setMagicReady] = useState<[boolean, boolean]>([false, false]);
-  const [magicPlaying, setMagicPlaying] = useState<[boolean, boolean]>([false, false]);
-  const [magicStretch, setMagicStretch] = useState(20);
-  const [magicLayers, setMagicLayers] = useState(true);
-  const [magicReverb, setMagicReverb] = useState(8);
+  const [showMagicPanel, setShowMagicPanel] = useState(false);
+
+  // Magic modes: each mode has independent state per lane
+  type MagicMode = "mystical" | "somna" | "vertigo";
+  const MAGIC_MODES: MagicMode[] = ["mystical", "somna", "vertigo"];
+  type MagicFx = { volume: number; eqLow: number; eqMid: number; eqHigh: number; filterFreq: number; delayWet: number; delayTime: number; delayFb: number; reverbWet: number; reverbDecay: number };
+  const MAGIC_FX_DEFAULTS: Record<MagicMode, MagicFx> = {
+    mystical: { volume: 1, eqLow: 2, eqMid: 0, eqHigh: 3, filterFreq: 20000, delayWet: 0.15, delayTime: 0.5, delayFb: 0.25, reverbWet: 0.35, reverbDecay: 4 },
+    somna:    { volume: 0.8, eqLow: 4, eqMid: -3, eqHigh: -8, filterFreq: 2500, delayWet: 0.45, delayTime: 1.2, delayFb: 0.6, reverbWet: 0.75, reverbDecay: 10 },
+    vertigo:  { volume: 0.9, eqLow: -2, eqMid: 5, eqHigh: 4, filterFreq: 12000, delayWet: 0.6, delayTime: 0.18, delayFb: 0.85, reverbWet: 0.5, reverbDecay: 6 },
+  };
+  // Per-mode per-lane: generating, ready, playing
+  const [magicGenerating, setMagicGenerating] = useState<Record<MagicMode, [boolean, boolean]>>({ mystical: [false, false], somna: [false, false], vertigo: [false, false] });
+  const [magicReady, setMagicReady] = useState<Record<MagicMode, [boolean, boolean]>>({ mystical: [false, false], somna: [false, false], vertigo: [false, false] });
+  // Only one mode can play at a time per lane — track which
+  const [magicPlayingMode, setMagicPlayingMode] = useState<[MagicMode | null, MagicMode | null]>([null, null]);
+  // Per-mode FX
+  const [magicFxAll, setMagicFxAll] = useState<Record<MagicMode, MagicFx>>(() => ({
+    mystical: { ...MAGIC_FX_DEFAULTS.mystical },
+    somna: { ...MAGIC_FX_DEFAULTS.somna },
+    vertigo: { ...MAGIC_FX_DEFAULTS.vertigo },
+  }));
+  // Pattern snapshot at generation time per mode+lane — to know if pattern changed
+  const magicPatternSnapRef = useRef<Record<MagicMode, [string, string]>>({ mystical: ["", ""], somna: ["", ""], vertigo: ["", ""] });
 
   // Mouse drag painting state
   const [isPainting, setIsPainting] = useState(false);
@@ -157,9 +172,16 @@ export default function EditorPage() {
   const paintedCellsRef = useRef<Set<string>>(new Set());
   const paintingLaneRef = useRef<number>(-1);
 
+  // Bar selection & clipboard
+  const [selRange, setSelRange] = useState<{ lane: number; start: number; end: number } | null>(null);
+  const selDragging = useRef(false);
+  const selAnchor = useRef(0);
+  const clipboardRef = useRef<{ data: number[][]; width: number } | null>(null);
+
   const engineRefs = [useRef<AudioEngine | null>(null), useRef<AudioEngine | null>(null)];
   const canvasRefs = [useRef<HTMLCanvasElement>(null), useRef<HTMLCanvasElement>(null)];
   const loadedRef = useRef(false);
+  const scrubbingRef = useRef<number>(-1); // lane index being scrubbed, -1 = none
 
   // Build a LaneState (for persistence) from indexed state
   const buildLaneState = (idx: number) => ({
@@ -173,7 +195,8 @@ export default function EditorPage() {
       halfSpeed: laneTrackHalfSpeed[idx][i],
     })),
     pattern: lanePatterns[idx],
-    chopBoundaries: laneChops[idx].map((c) => ({ start: c.start, end: c.end })),
+    chopBoundaries: laneChops[idx].map((c) => ({ start: c.start, end: c.end, label: c.label })),
+    chopMode: laneChopModes[idx],
   });
 
   // Load project
@@ -199,6 +222,7 @@ export default function EditorPage() {
         updateLane(setLaneTrackMutes, 0, lane0Data.tracks.map((t) => t.muted));
         updateLane(setLaneTrackPitches, 0, lane0Data.tracks.map((t) => (t as any).pitch ?? 0));
         updateLane(setLaneTrackHalfSpeed, 0, lane0Data.tracks.map((t) => (t as any).halfSpeed ?? false));
+        if ((lane0Data as any).chopMode) updateLane(setLaneChopModes, 0, (lane0Data as any).chopMode);
       }
 
       // Load lane 1
@@ -209,9 +233,22 @@ export default function EditorPage() {
         updateLane(setLaneTrackMutes, 1, lane1Data.tracks.map((t) => t.muted));
         updateLane(setLaneTrackPitches, 1, lane1Data.tracks.map((t) => (t as any).pitch ?? 0));
         updateLane(setLaneTrackHalfSpeed, 1, lane1Data.tracks.map((t) => (t as any).halfSpeed ?? false));
+        if ((lane1Data as any).chopMode) updateLane(setLaneChopModes, 1, (lane1Data as any).chopMode);
       }
 
       loadedRef.current = true;
+
+      // Rebuild chops from saved boundaries (instead of re-detecting)
+      const rebuildChops = (boundaries: { start: number; end: number; label?: string }[]): Chop[] => {
+        return boundaries.map((b, i) => ({
+          index: i,
+          start: b.start,
+          end: b.end,
+          label: b.label ?? `${i + 1}`,
+          energy: 0.5,
+          spectralCentroid: 0,
+        }));
+      };
 
       // Try to reload audio for lane 0
       getAudioBlob(projectId, 0).then(async (blob) => {
@@ -223,9 +260,9 @@ export default function EditorPage() {
           updateLane(setLaneFileNames, 0, "(saved audio)");
 
           if (lane0Data && lane0Data.chopBoundaries.length > 0) {
-            const detectedChops = detectTransients(buffer);
-            updateLane(setLaneChops, 0, detectedChops);
-            await initEngine(buffer, detectedChops, 0, p, lane0Data);
+            const restoredChops = rebuildChops(lane0Data.chopBoundaries);
+            updateLane(setLaneChops, 0, restoredChops);
+            await initEngine(buffer, restoredChops, 0, p, lane0Data);
           }
         }
       });
@@ -240,9 +277,9 @@ export default function EditorPage() {
           updateLane(setLaneFileNames, 1, "(saved audio)");
 
           if (lane1Data && lane1Data.chopBoundaries.length > 0) {
-            const detectedChops = detectTransients(buffer);
-            updateLane(setLaneChops, 1, detectedChops);
-            await initEngine(buffer, detectedChops, 1, p, lane1Data);
+            const restoredChops = rebuildChops(lane1Data.chopBoundaries);
+            updateLane(setLaneChops, 1, restoredChops);
+            await initEngine(buffer, restoredChops, 1, p, lane1Data);
           }
         }
       });
@@ -254,12 +291,26 @@ export default function EditorPage() {
     };
   }, [projectId]);
 
-  // Autosave
+  // Autosave — use a ref so we can flush on exit
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSaveRef = useRef<(() => Promise<void>) | null>(null);
+
+  const flushSave = useCallback(async () => {
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    if (pendingSaveRef.current) {
+      await pendingSaveRef.current();
+      pendingSaveRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     if (!project || !loadedRef.current) return;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
-    autosaveTimerRef.current = setTimeout(async () => {
+
+    const doSave = async () => {
       const updated: ProjectData = {
         ...project,
         bpm,
@@ -270,11 +321,36 @@ export default function EditorPage() {
       };
       await saveProject(updated);
       setProject(updated);
-    }, 2000);
+      pendingSaveRef.current = null;
+    };
+
+    pendingSaveRef.current = doSave;
+    autosaveTimerRef.current = setTimeout(doSave, 1500);
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
-  }, [bpm, lanePatterns, laneTrackChops, laneTrackEffects, laneTrackMutes, laneTrackPitches, laneTrackHalfSpeed, laneChops]);
+  }, [bpm, lanePatterns, laneTrackChops, laneTrackEffects, laneTrackMutes, laneTrackPitches, laneTrackHalfSpeed, laneChops, laneChopModes]);
+
+  // Flush save on page unload (close tab, refresh)
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (pendingSaveRef.current && project && loadedRef.current) {
+        // Use sendBeacon for reliable save on unload
+        const updated = {
+          ...project,
+          bpm,
+          lanes: [buildLaneState(0), buildLaneState(1)],
+          updatedAt: new Date().toISOString(),
+        };
+        navigator.sendBeacon(
+          `/api/projects/${projectId}`,
+          new Blob([JSON.stringify(updated)], { type: "application/json" })
+        );
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  });
 
   // Draw waveforms
   useEffect(() => {
@@ -388,6 +464,9 @@ export default function EditorPage() {
 
   // Mouse drag painting
   const handleCellMouseDown = (track: number, step: number, laneIdx: number) => {
+    // Clear bar selection when painting cells
+    setSelRange(null);
+
     const chopIdx = laneTrackChops[laneIdx][track];
     if (chopIdx < 0) return;
 
@@ -418,12 +497,64 @@ export default function EditorPage() {
     setIsPainting(false);
     paintedCellsRef.current.clear();
     paintingLaneRef.current = -1;
+    selDragging.current = false;
   }, []);
 
   useEffect(() => {
     window.addEventListener("mouseup", handleMouseUp);
     return () => window.removeEventListener("mouseup", handleMouseUp);
   }, [handleMouseUp]);
+
+  // Bar selection: mousedown on step header starts selection
+  const handleStepHeaderMouseDown = useCallback((step: number, laneIdx: number) => {
+    selDragging.current = true;
+    selAnchor.current = step;
+    setSelRange({ lane: laneIdx, start: step, end: step });
+  }, []);
+
+  const handleStepHeaderMouseEnter = useCallback((step: number, laneIdx: number) => {
+    if (!selDragging.current) return;
+    const a = selAnchor.current;
+    setSelRange({ lane: laneIdx, start: Math.min(a, step), end: Math.max(a, step) });
+  }, []);
+
+  // Ctrl+C / Ctrl+V
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+
+      if (e.key === "c" && selRange) {
+        e.preventDefault();
+        const pattern = lanePatterns[selRange.lane];
+        const width = selRange.end - selRange.start + 1;
+        const data = pattern.map((row) => row.slice(selRange.start, selRange.start + width));
+        clipboardRef.current = { data, width };
+      }
+
+      if (e.key === "v" && clipboardRef.current && selRange) {
+        e.preventDefault();
+        const { data, width } = clipboardRef.current;
+        const pasteStart = selRange.start;
+        const laneIdx = selRange.lane;
+        const newPattern = lanePatterns[laneIdx].map((row) => [...row]);
+        for (let t = 0; t < 16; t++) {
+          for (let s = 0; s < width; s++) {
+            const target = pasteStart + s;
+            if (target < 64) {
+              newPattern[t][target] = data[t][s];
+            }
+          }
+        }
+        updateLane(setLanePatterns, laneIdx, newPattern);
+        engineRefs[laneIdx].current?.setPattern(newPattern);
+        // Update selection to show pasted area
+        setSelRange({ lane: laneIdx, start: pasteStart, end: Math.min(pasteStart + width - 1, 63) });
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [selRange, lanePatterns]);
 
   // Track chop assignment
   const assignChop = async (track: number, chopIndex: number, laneIdx: number) => {
@@ -630,27 +761,17 @@ export default function EditorPage() {
     const T = await import("tone");
     T.getTransport().bpm.value = bpm;
 
-    if (playMode === "both" || playMode === 0) {
-      if (engineRefs[0].current) {
-        engineRefs[0].current.bpm = bpm;
-        engineRefs[0].current.setPattern(lanePatterns[0]);
-        await engineRefs[0].current.startSequence();
-      }
-    }
-    if (playMode === "both" || playMode === 1) {
-      if (engineRefs[1].current) {
-        engineRefs[1].current.bpm = bpm;
-        engineRefs[1].current.setPattern(lanePatterns[1]);
-        await engineRefs[1].current.startSequence();
+    for (const idx of [0, 1]) {
+      if (engineRefs[idx].current) {
+        engineRefs[idx].current.bpm = bpm;
+        engineRefs[idx].current.setPattern(lanePatterns[idx]);
+        await engineRefs[idx].current.startSequence();
       }
     }
 
     T.getTransport().start();
     setIsPlaying(true);
-    setLanePlaying([
-      playMode === "both" || playMode === 0,
-      playMode === "both" || playMode === 1,
-    ]);
+    setLanePlaying([true, true]);
   };
 
   const handlePause = async () => {
@@ -731,6 +852,34 @@ export default function EditorPage() {
     return () => {
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
+    };
+  }, []);
+
+  // Waveform scrubbing
+  const handleWaveformScrub = (e: React.MouseEvent | MouseEvent, laneIdx: number) => {
+    const canvas = canvasRefs[laneIdx].current;
+    if (!canvas || !engineRefs[laneIdx].current) return;
+    const rect = canvas.getBoundingClientRect();
+    const position = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    engineRefs[laneIdx].current!.playSourceAt(position);
+  };
+
+  useEffect(() => {
+    const handleScrubMove = (e: MouseEvent) => {
+      if (scrubbingRef.current < 0) return;
+      handleWaveformScrub(e, scrubbingRef.current);
+    };
+    const handleScrubUp = () => {
+      if (scrubbingRef.current >= 0) {
+        engineRefs[scrubbingRef.current].current?.stopSource();
+        scrubbingRef.current = -1;
+      }
+    };
+    window.addEventListener("mousemove", handleScrubMove);
+    window.addEventListener("mouseup", handleScrubUp);
+    return () => {
+      window.removeEventListener("mousemove", handleScrubMove);
+      window.removeEventListener("mouseup", handleScrubUp);
     };
   }, []);
 
@@ -835,30 +984,17 @@ export default function EditorPage() {
     engineRefs[laneIdx].current?.setPattern(empty);
   };
 
-  // Save
-  const handleSave = async () => {
-    if (!project) return;
-    setSaving(true);
-    const updated: ProjectData = {
-      ...project,
-      bpm,
-      lanes: [
-        buildLaneState(0),
-        buildLaneState(1),
-      ],
-    };
-    await saveProject(updated);
-    setProject(updated);
-    setTimeout(() => setSaving(false), 800);
-  };
-
   // Re-chop helper
-  const doRechop = async (mode: "transient" | "equal" | "fine", sens: "soft" | "medium" | "hard", laneIdx: number) => {
+  const doRechop = async (mode: "transient" | "equal" | "fine" | "long", sens: "soft" | "medium" | "hard", laneIdx: number) => {
     if (!laneBuffers[laneIdx]) return;
     const audioBuffer = laneBuffers[laneIdx]!;
 
     let newChops;
-    if (mode === "equal") {
+    if (mode === "long") {
+      // Long notes: only segments > threshold duration, attack trimmed
+      const minDurMap = { soft: 2.0, medium: 1.0, hard: 0.5 };
+      newChops = chopLongNotes(audioBuffer, minDurMap[sens]);
+    } else if (mode === "equal") {
       const sliceMap = { soft: 16, medium: 32, hard: 64 };
       newChops = chopEqual(audioBuffer, sliceMap[sens]);
     } else if (mode === "fine") {
@@ -903,7 +1039,7 @@ export default function EditorPage() {
     await doRechop(laneChopModes[laneIdx], sens, laneIdx);
   };
 
-  const handleChopModeChange = async (mode: "transient" | "equal" | "fine", laneIdx: number) => {
+  const handleChopModeChange = async (mode: "transient" | "equal" | "fine" | "long", laneIdx: number) => {
     updateLane(setLaneChopModes, laneIdx, mode);
     await doRechop(mode, laneSensitivities[laneIdx], laneIdx);
   };
@@ -965,7 +1101,7 @@ export default function EditorPage() {
       } else if (mode === "magic") {
         // Export magic soundscape for each lane that has one
         for (const idx of [0, 1]) {
-          if (engineRefs[idx].current?.hasMagicBuffer) {
+          if (engineRefs[idx].current?.hasMagicBuffer()) {
             const blob = await engineRefs[idx].current!.exportMagicWAV();
             downloadBlob(blob, `${name}-magic-lane${idx + 1}.wav`);
           }
@@ -1051,17 +1187,19 @@ export default function EditorPage() {
               <span className="text-xs text-muted-foreground/50">|</span>
               {/* Chop mode toggle */}
               <div className="flex items-center gap-0.5">
-                {(["transient", "equal", "fine"] as const).map((m) => (
+                {(["transient", "equal", "fine", "long"] as const).map((m) => (
                   <button
                     key={m}
                     onClick={() => handleChopModeChange(m, laneIdx)}
                     className={`px-1.5 py-0.5 rounded text-[10px] ${
                       chopMode === m
-                        ? "bg-primary/15 text-primary border border-primary/25"
+                        ? m === "long"
+                          ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/25"
+                          : "bg-primary/15 text-primary border border-primary/25"
                         : "text-muted-foreground hover:text-foreground border border-transparent"
                     }`}
                   >
-                    {m}
+                    {m === "long" ? "long notes" : m}
                   </button>
                 ))}
               </div>
@@ -1212,11 +1350,16 @@ export default function EditorPage() {
         {/* Editor content */}
         {buffer && !loading && (
           <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-            {/* Waveform */}
+            {/* Waveform (click/drag to scrub) */}
             <div className="px-4 py-1 flex-shrink-0">
               <canvas
                 ref={canvasRefs[laneIdx]}
-                className="w-full h-12 rounded bg-secondary/50"
+                className="w-full h-12 rounded bg-secondary/50 cursor-crosshair"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  scrubbingRef.current = laneIdx;
+                  handleWaveformScrub(e, laneIdx);
+                }}
               />
             </div>
 
@@ -1390,25 +1533,35 @@ export default function EditorPage() {
                       </button>
                     ))}
                   </div>
-                  {/* Step numbers header */}
-                  <div className="h-7 border-b border-border/30 flex">
-                    {Array.from({ length: 64 }, (_, s) => (
-                      <div
-                        key={s}
-                        className={`w-8 flex-shrink-0 flex items-center justify-center text-[9px] tabular-nums ${
-                          s % 8 === 0
-                            ? "text-muted-foreground font-medium"
-                            : "text-muted-foreground/40"
-                        } ${
-                          currentStep === s
-                            ? "text-primary font-bold"
-                            : ""
-                        }`}
-                        style={{ fontFamily: "var(--font-mono)" }}
-                      >
-                        {s + 1}
-                      </div>
-                    ))}
+                  {/* Step numbers header — drag to select bars */}
+                  <div className="h-7 border-b border-border/30 flex select-none">
+                    {Array.from({ length: 64 }, (_, s) => {
+                      const isSelected = selRange && selRange.lane === laneIdx && s >= selRange.start && s <= selRange.end;
+                      return (
+                        <div
+                          key={s}
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            handleStepHeaderMouseDown(s, laneIdx);
+                          }}
+                          onMouseEnter={() => handleStepHeaderMouseEnter(s, laneIdx)}
+                          className={`w-8 flex-shrink-0 flex items-center justify-center text-[9px] tabular-nums cursor-pointer ${
+                            isSelected
+                              ? "bg-primary/20 text-primary font-bold"
+                              : s % 8 === 0
+                              ? "text-muted-foreground font-medium hover:bg-primary/10"
+                              : "text-muted-foreground/40 hover:bg-primary/5"
+                          } ${
+                            currentStep === s && !isSelected
+                              ? "text-primary font-bold"
+                              : ""
+                          }`}
+                          style={{ fontFamily: "var(--font-mono)" }}
+                        >
+                          {s + 1}
+                        </div>
+                      );
+                    })}
                   </div>
 
                   {/* Grid rows */}
@@ -1419,6 +1572,7 @@ export default function EditorPage() {
                         const isCurrentStep = currentStep === s;
                         const isBeat = s % 8 === 0;
                         const isHalfBeat = s % 4 === 0;
+                        const isSelected = selRange && selRange.lane === laneIdx && s >= selRange.start && s <= selRange.end;
 
                         return (
                           <div
@@ -1437,14 +1591,24 @@ export default function EditorPage() {
                             } ${isActive ? "active" : ""} ${
                               isCurrentStep && !isActive ? "playing" : ""
                             }`}
-                            style={
-                              isActive
+                            style={{
+                              ...(isActive
                                 ? {
                                     backgroundColor: `${TRACK_COLORS[t]}33`,
                                     boxShadow: `inset 0 0 8px ${TRACK_COLORS[t]}22`,
                                   }
-                                : undefined
-                            }
+                                : {}),
+                              ...(isSelected
+                                ? {
+                                    backgroundColor: isActive
+                                      ? `${TRACK_COLORS[t]}55`
+                                      : "rgba(var(--primary-rgb, 139, 92, 246), 0.08)",
+                                    boxShadow: isActive
+                                      ? `inset 0 0 8px ${TRACK_COLORS[t]}44`
+                                      : "inset 0 0 0 1px rgba(139, 92, 246, 0.15)",
+                                  }
+                                : {}),
+                            }}
                           >
                             {isActive && (
                               <div className="w-full h-full flex items-center justify-center">
@@ -1477,7 +1641,7 @@ export default function EditorPage() {
       <header className="border-b border-border/50 px-4 py-3 flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-3">
           <button
-            onClick={() => router.push("/")}
+            onClick={async () => { await flushSave(); router.push("/"); }}
             className="p-1.5 rounded-md hover:bg-secondary transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
@@ -1500,13 +1664,6 @@ export default function EditorPage() {
             title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
           >
             {theme === "dark" ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
-          </button>
-          <button
-            onClick={handleSave}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border text-xs hover:bg-secondary transition-colors"
-          >
-            <Save className="w-3.5 h-3.5" />
-            {saving ? "Saved" : "Save"}
           </button>
           <div className="relative">
             <button
@@ -1535,7 +1692,7 @@ export default function EditorPage() {
                   <span className="font-medium">Merged</span>
                   <span className="text-[10px] text-muted-foreground">Both lanes mixed into one WAV</span>
                 </button>
-                {project.mode === "advanced" && (magicReady[0] || magicReady[1]) && (
+                {(MAGIC_MODES.some(m => magicReady[m][0] || magicReady[m][1])) && (
                   <button
                     onClick={() => handleExport("magic")}
                     className="w-full px-3 py-1.5 text-left text-xs hover:bg-secondary flex flex-col"
@@ -1578,26 +1735,6 @@ export default function EditorPage() {
             <Square className="w-4 h-4" />
           </button>
         </div>
-
-        {/* Play mode selector */}
-        <div className="flex items-center gap-0.5 border border-border rounded-md">
-          {([0, "both", 1] as const).map((mode) => (
-            <button
-              key={String(mode)}
-              onClick={() => setPlayMode(mode)}
-              className={`px-2 py-1 text-[10px] font-medium ${
-                playMode === mode
-                  ? "bg-primary/20 text-primary"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-              style={{ fontFamily: "var(--font-mono)" }}
-            >
-              {mode === "both" ? "1+2" : `L${(mode as number) + 1}`}
-            </button>
-          ))}
-        </div>
-
-        <div className="w-px h-6 bg-border" />
 
         {/* BPM */}
         <div className="flex items-center gap-1.5">
@@ -1768,8 +1905,8 @@ export default function EditorPage() {
           />
         </div>
 
-        {/* Step indicator */}
-        <div className="ml-auto">
+        {/* Step indicator + Magic button */}
+        <div className="ml-auto flex items-center gap-3">
           <span
             className="text-xs text-muted-foreground tabular-nums"
             style={{ fontFamily: "var(--font-mono)" }}
@@ -1780,6 +1917,22 @@ export default function EditorPage() {
             </span>
             /64
           </span>
+          <button
+            onClick={() => setShowMagicPanel(!showMagicPanel)}
+            disabled={!hasAnyChops}
+            className={`px-3 py-1 rounded-md text-[10px] font-bold border transition-all disabled:opacity-30 ${
+              showMagicPanel
+                ? "border-purple-500/50 bg-purple-500/20"
+                : "border-purple-500/30 hover:bg-purple-500/10"
+            }`}
+            style={{
+              fontFamily: "var(--font-mono)",
+              background: showMagicPanel ? undefined : (hasAnyChops ? "linear-gradient(135deg, rgba(168,85,247,0.1), rgba(236,72,153,0.1))" : undefined),
+              color: "#c084fc",
+            }}
+          >
+            {magicPlayingMode[0] || magicPlayingMode[1] ? "Magic ●" : "Make Magic"}
+          </button>
         </div>
       </div>
 
@@ -1808,148 +1961,21 @@ export default function EditorPage() {
               </span>
             </div>
 
-            {/* MAGIC soundscape section — per lane */}
-            {[0, 1].map((laneIdx) => {
-              const hasPattern = laneChops[laneIdx].length > 0 && lanePatterns[laneIdx].some(row => row.some(v => v >= 0));
-              const generating = magicGenerating[laneIdx];
-              const ready = magicReady[laneIdx];
-              const playing = magicPlaying[laneIdx];
-
-              return (
-                <div key={`magic-${laneIdx}`} className="border-b border-border/30">
-                  <div className="px-3 py-2">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-[10px] font-bold" style={{ fontFamily: "var(--font-mono)", background: "linear-gradient(90deg, #a855f7, #ec4899)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
-                        MAGIC
-                      </span>
-                      <span className="text-[10px] text-muted-foreground" style={{ fontFamily: "var(--font-mono)" }}>
-                        L{laneIdx + 1}
-                      </span>
-                    </div>
-                    <p className="text-[8px] text-muted-foreground/50 mb-2">
-                      Renders piano roll → Paulstretch → soundscape
-                    </p>
-
-                    {!hasPattern ? (
-                      <span className="text-[10px] text-muted-foreground/50">Create a pattern first</span>
-                    ) : (
-                      <div className="space-y-2">
-                        {/* Stretch factor */}
-                        <div className="flex items-center gap-2">
-                          <span className="text-[9px] text-muted-foreground w-12">stretch</span>
-                          <input
-                            type="range"
-                            min={5}
-                            max={50}
-                            value={magicStretch}
-                            onChange={(e) => setMagicStretch(Number(e.target.value))}
-                            className="flex-1 h-1 accent-purple-400"
-                          />
-                          <span className="text-[9px] text-muted-foreground w-8 text-right" style={{ fontFamily: "var(--font-mono)" }}>
-                            {magicStretch}x
-                          </span>
-                        </div>
-
-                        {/* Reverb tail */}
-                        <div className="flex items-center gap-2">
-                          <span className="text-[9px] text-muted-foreground w-12">reverb</span>
-                          <input
-                            type="range"
-                            min={3}
-                            max={15}
-                            value={magicReverb}
-                            onChange={(e) => setMagicReverb(Number(e.target.value))}
-                            className="flex-1 h-1 accent-purple-400"
-                          />
-                          <span className="text-[9px] text-muted-foreground w-8 text-right" style={{ fontFamily: "var(--font-mono)" }}>
-                            {magicReverb}s
-                          </span>
-                        </div>
-
-                        {/* Layers toggle */}
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => setMagicLayers(!magicLayers)}
-                            className={`text-[9px] px-1.5 py-0.5 rounded border ${
-                              magicLayers
-                                ? "bg-purple-500/20 text-purple-400 border-purple-500/30"
-                                : "text-muted-foreground border-transparent hover:border-border"
-                            }`}
-                            style={{ fontFamily: "var(--font-mono)" }}
-                          >
-                            octave layers
-                          </button>
-                        </div>
-
-                        {/* Generate button */}
-                        <button
-                          onClick={async () => {
-                            updateLane(setMagicGenerating, laneIdx, true);
-                            try {
-                              const engine = engineRefs[laneIdx].current;
-                              if (engine) {
-                                engine.setPattern(lanePatterns[laneIdx]);
-                                await engine.generateMagic({
-                                  stretchFactor: magicStretch,
-                                  windowSize: 8192,
-                                  layers: magicLayers,
-                                  reverbTail: magicReverb,
-                                });
-                                updateLane(setMagicReady, laneIdx, true);
-                              }
-                            } catch (err) {
-                              console.error("Magic generation error:", err);
-                            } finally {
-                              updateLane(setMagicGenerating, laneIdx, false);
-                            }
-                          }}
-                          disabled={generating}
-                          className="w-full py-1.5 rounded text-[10px] font-bold border transition-all disabled:opacity-40"
-                          style={{
-                            fontFamily: "var(--font-mono)",
-                            background: generating ? undefined : "linear-gradient(135deg, rgba(168,85,247,0.15), rgba(236,72,153,0.15))",
-                            borderColor: "rgba(168,85,247,0.3)",
-                            color: generating ? undefined : "#c084fc",
-                          }}
-                        >
-                          {generating ? "Generating..." : "Generate Soundscape"}
-                        </button>
-
-                        {/* Play/Stop */}
-                        {ready && (
-                          <div className="flex gap-1.5">
-                            <button
-                              onClick={async () => {
-                                const engine = engineRefs[laneIdx].current;
-                                if (!engine) return;
-                                if (playing) {
-                                  engine.stopMagic();
-                                  updateLane(setMagicPlaying, laneIdx, false);
-                                } else {
-                                  await engine.playMagic();
-                                  updateLane(setMagicPlaying, laneIdx, true);
-                                }
-                              }}
-                              className={`flex-1 py-1 rounded text-[10px] font-bold border ${
-                                playing
-                                  ? "bg-pink-500/20 text-pink-400 border-pink-500/30"
-                                  : "bg-purple-500/10 text-purple-400 border-purple-500/20 hover:bg-purple-500/20"
-                              }`}
-                              style={{ fontFamily: "var(--font-mono)" }}
-                            >
-                              {playing ? "Stop" : "Play Soundscape"}
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-
-            {/* Per-lane Voice FX sections */}
-            {[0, 1].map((laneIdx) => {
+            {/* Advanced Voice FX — collapsible */}
+            <div className="border-b border-border/30">
+              <button
+                onClick={() => setAdvFxOpen(!advFxOpen)}
+                className="w-full px-3 py-2 flex items-center justify-between text-left hover:bg-secondary/30 transition-colors"
+              >
+                <span className="text-[10px] font-bold text-muted-foreground/50" style={{ fontFamily: "var(--font-mono)" }}>
+                  ADVANCED
+                </span>
+                <span className="text-[9px] text-muted-foreground/30" style={{ fontFamily: "var(--font-mono)" }}>
+                  {advFxOpen ? "▾" : "▸"} TBD
+                </span>
+              </button>
+            </div>
+            {advFxOpen && [0, 1].map((laneIdx) => {
               const advTracks = laneAdvTracks[laneIdx];
               const selTrack = selectedAdvTrack[laneIdx];
               const adv = advTracks[selTrack];
@@ -2323,6 +2349,167 @@ export default function EditorPage() {
                       </div>
                     </div>
                   )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Magic Soundscape Panel */}
+        {showMagicPanel && (
+          <div className="w-80 flex-shrink-0 border-l border-purple-500/20 overflow-y-auto bg-card/50 backdrop-blur-sm">
+            <div className="p-3 border-b border-purple-500/20 flex items-center justify-between">
+              <span className="text-[11px] font-bold" style={{ fontFamily: "var(--font-mono)", background: "linear-gradient(90deg, #a855f7, #ec4899)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+                MAGIC SOUNDSCAPE
+              </span>
+              <button onClick={() => setShowMagicPanel(false)} className="text-muted-foreground hover:text-foreground text-xs">✕</button>
+            </div>
+
+            {[0, 1].map((laneIdx) => {
+              const hasPattern = laneChops[laneIdx].length > 0 && lanePatterns[laneIdx].some(row => row.some(v => v >= 0));
+              if (!hasPattern) return (
+                <div key={laneIdx} className="px-3 py-2 border-b border-border/20">
+                  <span className="text-[10px] text-muted-foreground" style={{ fontFamily: "var(--font-mono)" }}>L{laneIdx + 1}</span>
+                  <span className="text-[9px] text-muted-foreground/50 ml-2">no pattern</span>
+                </div>
+              );
+
+              const currentPatternSnap = JSON.stringify(lanePatterns[laneIdx]);
+              const playingMode = magicPlayingMode[laneIdx];
+
+              return (
+                <div key={laneIdx} className="border-b border-border/20">
+                  <div className="px-3 py-2">
+                    <span className="text-[10px] font-bold text-purple-400" style={{ fontFamily: "var(--font-mono)" }}>LANE {laneIdx + 1}</span>
+                  </div>
+
+                  {MAGIC_MODES.map((mode) => {
+                    const modeColors: Record<MagicMode, { accent: string; bg: string; border: string }> = {
+                      mystical: { accent: "text-purple-400", bg: "rgba(168,85,247,0.15)", border: "rgba(168,85,247,0.3)" },
+                      somna:    { accent: "text-indigo-400", bg: "rgba(99,102,241,0.15)", border: "rgba(99,102,241,0.3)" },
+                      vertigo:  { accent: "text-rose-400", bg: "rgba(244,63,94,0.15)", border: "rgba(244,63,94,0.3)" },
+                    };
+                    const mc = modeColors[mode];
+                    const generating = magicGenerating[mode][laneIdx];
+                    const ready = magicReady[mode][laneIdx];
+                    const isPlaying = playingMode === mode;
+                    const patternDirty = ready && magicPatternSnapRef.current[mode][laneIdx] !== currentPatternSnap;
+                    const fx = magicFxAll[mode];
+                    const setFx = (patch: Partial<MagicFx>) => setMagicFxAll(prev => ({ ...prev, [mode]: { ...prev[mode], ...patch } }));
+
+                    return (
+                      <div key={mode} className="px-3 py-2 space-y-1.5" style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+                        <div className="flex items-center justify-between">
+                          <span className={`text-[10px] font-bold ${mc.accent} uppercase`} style={{ fontFamily: "var(--font-mono)" }}>{mode}</span>
+                          {ready && !patternDirty && <span className="text-[8px] text-green-500/70" style={{ fontFamily: "var(--font-mono)" }}>ready</span>}
+                          {patternDirty && <span className="text-[8px] text-yellow-500/70" style={{ fontFamily: "var(--font-mono)" }}>pattern changed</span>}
+                        </div>
+
+                        {/* Generate / Regenerate */}
+                        <button
+                          onClick={async () => {
+                            setMagicGenerating(prev => ({ ...prev, [mode]: prev[mode].map((v: boolean, i: number) => i === laneIdx ? true : v) as [boolean, boolean] }));
+                            try {
+                              const engine = engineRefs[laneIdx].current;
+                              if (engine) {
+                                if (isPlaying) { engine.stopMagic(); setMagicPlayingMode(prev => [laneIdx === 0 ? null : prev[0], laneIdx === 1 ? null : prev[1]]); }
+                                engine.setPattern(lanePatterns[laneIdx]);
+                                await engine.generateMagic(mode, {
+                                  stretchFactor: 20, windowSize: 4096, reverbTail: 8, character: mode,
+                                });
+                                magicPatternSnapRef.current[mode][laneIdx] = currentPatternSnap;
+                                setMagicReady(prev => ({ ...prev, [mode]: prev[mode].map((v: boolean, i: number) => i === laneIdx ? true : v) as [boolean, boolean] }));
+                              }
+                            } catch (err) { console.error(`Magic ${mode} error:`, err); }
+                            finally { setMagicGenerating(prev => ({ ...prev, [mode]: prev[mode].map((v: boolean, i: number) => i === laneIdx ? false : v) as [boolean, boolean] })); }
+                          }}
+                          disabled={generating || (ready && !patternDirty)}
+                          className="w-full py-1 rounded text-[9px] font-bold border transition-all disabled:opacity-30"
+                          style={{ fontFamily: "var(--font-mono)", background: mc.bg, borderColor: mc.border, color: generating ? undefined : mc.border.replace("0.3", "1") }}
+                        >
+                          {generating ? "Generating..." : ready ? "Regenerate" : "Generate"}
+                        </button>
+
+                        {/* Play/Stop */}
+                        {ready && (
+                          <button
+                            onClick={async () => {
+                              const engine = engineRefs[laneIdx].current;
+                              if (!engine) return;
+                              if (isPlaying) {
+                                engine.stopMagic();
+                                setMagicPlayingMode(prev => [laneIdx === 0 ? null : prev[0], laneIdx === 1 ? null : prev[1]]);
+                              } else {
+                                // Stop any other playing mode on this lane
+                                if (playingMode) engine.stopMagic();
+                                await engine.playMagic(mode);
+                                await engine.applyMagicPreset(fx);
+                                setMagicPlayingMode(prev => [laneIdx === 0 ? mode : prev[0], laneIdx === 1 ? mode : prev[1]]);
+                              }
+                            }}
+                            className={`w-full py-0.5 rounded text-[9px] font-bold border ${
+                              isPlaying ? "bg-pink-500/20 text-pink-400 border-pink-500/30" : "bg-card/50 text-muted-foreground border-border/30 hover:border-border"
+                            }`} style={{ fontFamily: "var(--font-mono)" }}>
+                            {isPlaying ? "■ Stop" : "▶ Play"}
+                          </button>
+                        )}
+
+                        {/* FX — only when this mode is playing */}
+                        {isPlaying && (
+                          <div className="space-y-1 pt-1 pl-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[8px] text-muted-foreground w-7">vol</span>
+                              <input type="range" min={0} max={100} value={Math.round(fx.volume * 100)} onChange={(e) => { const v = Number(e.target.value) / 100; setFx({ volume: v }); engineRefs[laneIdx].current?.setMagicVolume(v); }} className="flex-1 h-1 accent-purple-400" />
+                              <span className="text-[8px] text-muted-foreground w-6 text-right" style={{ fontFamily: "var(--font-mono)" }}>{Math.round(fx.volume * 100)}%</span>
+                            </div>
+                            {(["low", "mid", "high"] as const).map((band) => {
+                              const key = `eq${band.charAt(0).toUpperCase() + band.slice(1)}` as "eqLow" | "eqMid" | "eqHigh";
+                              return (
+                                <div key={band} className="flex items-center gap-2">
+                                  <span className="text-[8px] text-muted-foreground w-7">{band}</span>
+                                  <input type="range" min={-12} max={12} step={0.5} value={fx[key]} onChange={(e) => { const v = Number(e.target.value); setFx({ [key]: v }); engineRefs[laneIdx].current?.setMagicEQ(band, v); }} className="flex-1 h-1 accent-purple-400" />
+                                  <span className="text-[8px] text-muted-foreground w-7 text-right" style={{ fontFamily: "var(--font-mono)" }}>{fx[key] > 0 ? "+" : ""}{fx[key]}</span>
+                                </div>
+                              );
+                            })}
+                            <div className="flex items-center gap-2">
+                              <span className="text-[8px] text-muted-foreground w-7">filter</span>
+                              <input type="range" min={0} max={100} value={Math.round(Math.log(fx.filterFreq / 20) / Math.log(1000) * 100)} onChange={(e) => { const v = 20 * Math.pow(1000, Number(e.target.value) / 100); setFx({ filterFreq: v }); engineRefs[laneIdx].current?.setMagicFilter(v); }} className="flex-1 h-1 accent-purple-400" />
+                              <span className="text-[8px] text-muted-foreground w-8 text-right" style={{ fontFamily: "var(--font-mono)" }}>{fx.filterFreq >= 1000 ? (fx.filterFreq / 1000).toFixed(1) + "k" : Math.round(fx.filterFreq)}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[8px] text-muted-foreground w-7">dly</span>
+                              <input type="range" min={0} max={100} value={Math.round(fx.delayWet * 100)} onChange={(e) => { const v = Number(e.target.value) / 100; setFx({ delayWet: v }); engineRefs[laneIdx].current?.setMagicDelay(v, fx.delayTime, fx.delayFb); }} className="flex-1 h-1 accent-purple-400" />
+                              <span className="text-[8px] text-muted-foreground w-6 text-right" style={{ fontFamily: "var(--font-mono)" }}>{Math.round(fx.delayWet * 100)}%</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[8px] text-muted-foreground w-7">time</span>
+                              <input type="range" min={5} max={200} value={Math.round(fx.delayTime * 100)} onChange={(e) => { const v = Number(e.target.value) / 100; setFx({ delayTime: v }); engineRefs[laneIdx].current?.setMagicDelay(fx.delayWet, v, fx.delayFb); }} className="flex-1 h-1 accent-purple-400" />
+                              <span className="text-[8px] text-muted-foreground w-7 text-right" style={{ fontFamily: "var(--font-mono)" }}>{fx.delayTime.toFixed(2)}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[8px] text-muted-foreground w-7">fb</span>
+                              <input type="range" min={0} max={95} value={Math.round(fx.delayFb * 100)} onChange={(e) => { const v = Number(e.target.value) / 100; setFx({ delayFb: v }); engineRefs[laneIdx].current?.setMagicDelay(fx.delayWet, fx.delayTime, v); }} className="flex-1 h-1 accent-purple-400" />
+                              <span className="text-[8px] text-muted-foreground w-6 text-right" style={{ fontFamily: "var(--font-mono)" }}>{Math.round(fx.delayFb * 100)}%</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[8px] text-muted-foreground w-7">rvb</span>
+                              <input type="range" min={0} max={100} value={Math.round(fx.reverbWet * 100)} onChange={(e) => { const v = Number(e.target.value) / 100; setFx({ reverbWet: v }); engineRefs[laneIdx].current?.setMagicReverb(v, fx.reverbDecay); }} className="flex-1 h-1 accent-purple-400" />
+                              <span className="text-[8px] text-muted-foreground w-6 text-right" style={{ fontFamily: "var(--font-mono)" }}>{Math.round(fx.reverbWet * 100)}%</span>
+                            </div>
+                            <button onClick={async () => {
+                              const def = MAGIC_FX_DEFAULTS[mode];
+                              setFx(def);
+                              const engine = engineRefs[laneIdx].current;
+                              if (engine) await engine.applyMagicPreset(def);
+                            }} className="text-[7px] text-muted-foreground/40 hover:text-muted-foreground" style={{ fontFamily: "var(--font-mono)" }}>
+                              reset fx
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               );
             })}

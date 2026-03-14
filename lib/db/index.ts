@@ -88,6 +88,7 @@ export async function dbSaveProject(project: ProjectData): Promise<void> {
     access: "public",
     addRandomSuffix: false,
     contentType: "application/json",
+    allowOverwrite: true,
   });
 }
 
@@ -106,6 +107,7 @@ export async function dbSaveAudio(id: string, file: File | Blob, filename: strin
   const blob = await put(`${AUDIO_PREFIX}${id}/lane${lane}/${filename}`, file, {
     access: "public",
     addRandomSuffix: false,
+    allowOverwrite: true,
   });
   return blob.url;
 }

@@ -23,7 +23,8 @@ export interface TrackState {
 export interface LaneState {
   tracks: TrackState[];
   pattern: number[][]; // 16 tracks × 32 steps, value = chopIndex or -1
-  chopBoundaries: { start: number; end: number }[];
+  chopBoundaries: { start: number; end: number; label?: string }[];
+  chopMode?: "transient" | "equal" | "fine" | "long";
 }
 
 export type ProjectMode = "basic" | "advanced";

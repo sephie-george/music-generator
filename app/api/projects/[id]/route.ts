@@ -16,6 +16,15 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   return NextResponse.json({ ok: true });
 }
 
+// POST is used by sendBeacon on page unload (same as PUT)
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const body = await req.json();
+  body.id = id;
+  await dbSaveProject(body);
+  return NextResponse.json({ ok: true });
+}
+
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   await dbDeleteProject(id);
