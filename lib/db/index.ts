@@ -32,6 +32,7 @@ export async function dbGetProjectList(): Promise<ProjectMeta[]> {
     try {
       const res = await fetch(blob.url);
       const data: ProjectData = await res.json();
+      if (!data.id || !data.name) continue;
       projects.push({
         id: data.id,
         name: data.name,
