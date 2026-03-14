@@ -32,7 +32,7 @@ export async function dbGetProjectList(): Promise<ProjectMeta[]> {
     try {
       const res = await fetch(blob.url);
       const data: ProjectData = await res.json();
-      if (!data.id || !data.name) continue;
+      if (!data.id || !data.name || !data.createdAt) continue;
       projects.push({
         id: data.id,
         name: data.name,
@@ -127,4 +127,13 @@ export async function dbGetAudioUrl(id: string, lane: number = 0): Promise<strin
   } catch {
     return null;
   }
+}
+
+export async function dbListRawBlobs(): Promise<{ url: string; pathname: string; size: number }[]> {
+  const { blobs } = await list({ prefix: PROJECT_PREFIX });
+  return blobs.map(b => ({ url: b.url, pathname: b.pathname, size: b.size }));
+}
+
+export async function dbDeleteBlobByUrl(url: string): Promise<void> {
+  await del(url);
 }
